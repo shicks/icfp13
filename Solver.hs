@@ -70,9 +70,11 @@ checkOutputs (i:is) (o:os) p | evaluate p i == o = checkOutputs is os p
 
 solve :: Int -> String -> IO (TrainingProblem, [Word64], [Word64], GuessResponse)
 solve n os = do t <- train $ TrainRequest (Just n) os
+                putStrLn $ "Problem id: " ++ trainingId t
                 is <- pickInputs 200
                 os <- evalProblem (trainingId t) is
                 let ps = generate $ toProblem t
+                putStrLn $ "Possible programs: " ++ show (length ps)
                 let ps' = filter (checkOutputs is os) ps
                 gr <- if null ps'
                         then return $ GuessError "Empty"

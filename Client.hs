@@ -4,6 +4,7 @@ module Client where
 
 import Program
 
+import Debug.Trace ( trace )
 import Data.Char ( toUpper )
 import Data.Word ( Word64 )
 import Network.HTTP ( Response(..), postRequestWithBody, simpleHTTP )
@@ -40,11 +41,13 @@ instance JSON EvalRequest where
   showJSON (EvalProgram program args) = makeObj [("program", showJSON program), 
                                                  ("arguments", showJSON $ map toHex args)]
 
+tr s x = trace (s ++ " = " ++ show x) x
+
 instance JSON EvalResponse where
   readJSON (JSObject (fromJSObject -> o)) = 
     do status <- lookup' "status" o
        case status of
-         "ok" -> (EvalOk . map read) `fmap` lookup' "outputs" o
+         "ok" -> (EvalOk . map read . tr "resp") `fmap` lookup' "outputs" o
          "error" -> EvalError `fmap` lookup' "message" o
          _ -> fail $ "Unknown status: " ++ status
   showJSON _ = error "No need to serialize an EvalResponse"
