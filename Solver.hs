@@ -12,8 +12,8 @@ import Data.Maybe ( fromJust )
 import Text.ParserCombinators.Parsec ( parse )
 
 generate :: Problem -> [Program]
-generate (Problem _ s o _ _) = do e <- generate ["x"] (s-1) ops ops
-                                    return $ P "x" e
+generate (Problem _ s o _ _) = do e <- generate' ["x"] (s-1) ops ops
+                                  return $ P "x" e
   where ops = map (fromJust . parseOp) o
 
 -- Generates a list of all possible programs
