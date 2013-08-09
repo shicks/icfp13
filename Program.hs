@@ -25,6 +25,9 @@ data Op1 = Not | Shl1 | Shr1 | Shr4 | Shr16
 data Op2 = And | Or | Xor | Plus
          deriving ( Bounded, Eq, Enum, Ord )
 
+data Op = Cond | CFold | TFold | Unary Op1 | Binary Op2
+        deriving ( Eq, Ord )
+
 instance Show Program where
   show (P s e) = "(lambda (" ++ s ++ ") " ++ show e ++ ")"
 
@@ -45,6 +48,13 @@ instance Show Op1 where
 instance Show Op2 where
   show op = fromJust $ lookup op [(And, "and"), (Or, "or"),
                                   (Xor, "xor"), (Plus, "plus")]
+
+instance Show Op where
+  show Cond = "if0"
+  show TFold = "tfold"
+  show CFold = "fold"
+  show (Unary op) = show op
+  show (Binary op) = show op
 
 instance Read Program where
   readsPrec _ s = case parse (do p <- parseProgram    -- arrows?
@@ -84,31 +94,36 @@ op2 Or = (.|.)
 op2 Xor = xor
 op2 Plus = (+)
 
-size :: Program -> Int
-size (P _ e) = 1 + size' e
-  where size' Zero = 1
-        size' One = 1
-        size' (Id _) = 1
-        size' (If0 c t f) = 1 + size' c + size' t + size' f
-        size' (Fold e0 e1 _ _ e2) = 2 + size' e0 + size' e1 + size' e2
-        size' (Op1 _ e) = 1 + size' e
-        size' (Op2 _ e0 e1) = 1 + size' e0 + size' e1
+class HasSize s where
+  size :: s -> Int
 
-op :: Expression -> [String]
+instance HasSize Program where
+  size (P _ e) = 1 + size e
+
+instance HasSize Expression where
+  size Zero = 1
+  size One = 1
+  size (Id _) = 1
+  size (If0 c t f) = 1 + size c + size t + size f
+  size (Fold e0 e1 _ _ e2) = 2 + size e0 + size e1 + size e2
+  size (Op1 _ e) = 1 + size e
+  size (Op2 _ e0 e1) = 1 + size e0 + size e1
+
+op :: Expression -> [Op]
 op = nub . sort . op'
   where op' Zero = []
         op' One = []
         op' (Id _) = []
-        op' (If0 c t f) = "if0" : op' c ++ op' t ++ op' f
-        op' (Fold e0 e1 _ _ e2) = "fold" : op' e0 ++ op' e1 ++ op' e2
-        op' (Op1 op e) = show op : op' e
-        op' (Op2 op e0 e1) = show op : op' e0 ++ op' e1
+        op' (If0 c t f) = Cond : op' c ++ op' t ++ op' f
+        op' (Fold e0 e1 _ _ e2) = CFold : op' e0 ++ op' e1 ++ op' e2
+        op' (Op1 op e) = Unary op : op' e
+        op' (Op2 op e0 e1) = Binary op : op' e0 ++ op' e1
 
 -- | Note: in the spec this is described as a binary relation, but
 -- it seems like the second argument is strictly dependent on the
 -- first, so I'm implementing it as a function.
-operators :: Program -> [String]
-operators (P _ (Fold e0 e1 _ _ e2)) = nub $ sort $ "tfold" : op e0 ++ op e1 ++ op e2
+operators :: Program -> [Op]
+operators (P _ (Fold e0 e1 _ _ e2)) = nub $ sort $ TFold : op e0 ++ op e1 ++ op e2
 operators (P _ e) = op e
 
 parseProgram :: Parser Program
@@ -154,6 +169,9 @@ parseExpr = choice $ map try $ [string "0" >> return Zero,
                                    spaces >> string ")"
                                    return $ Op2 op e0 e1]
 
+allEnums :: (Bounded a, Enum a) => [a]
+allEnums = [minBound .. maxBound]
+
 word :: Parser String
 word = do c <- letter <|> char '_'
           cs <- many $ letter <|> digit <|> char '_'
@@ -161,5 +179,13 @@ word = do c <- letter <|> char '_'
 
 parseEnum :: (Bounded a, Enum a, Show a) => Parser a
 parseEnum = try $ do w <- word
-                     (a:[]) <- return $ filter ((==w) . show) [minBound..maxBound]
+                     (a:[]) <- return $ filter ((==w) . show) allEnums
                      return a
+
+parseOp :: String -> Maybe Op
+parseOp s = lookup s [("not", Unary Not), ("shl1", Unary Shl1),
+                      ("shr1", Unary Shr1), ("shr4", Unary Shr4),
+                      ("shr16", Unary Shr16), ("and", Binary And),
+                      ("or", Binary Or), ("xor", Binary Xor),
+                      ("plus", Binary Plus), ("if0", Cond),
+                      ("fold", CFold), ("tfold", TFold)]
