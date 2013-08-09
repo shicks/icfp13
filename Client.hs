@@ -9,7 +9,8 @@ import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
 import Debug.Trace ( trace )
 import Data.Char ( toUpper )
 import Data.Either ( partitionEithers )
-import Data.List ( intercalate )
+import Data.List ( intercalate, sortBy )
+import Data.Ord ( comparing )
 import Data.Word ( Word64 )
 import Network.HTTP ( Response(..), postRequestWithBody, simpleHTTP )
 import Numeric ( showHex )
@@ -103,11 +104,13 @@ data TrainingProblem = TrainingProblem { trainingChallenge :: String,
 
 instance JSON TrainRequest where
   readJSON _ = error "No need to deserialize a TrainRequest"
-  showJSON (TrainRequest (Just size) ops) = makeObj [("size", showJSON size), 
-                                                     ("operators", showJSON ops)]
-  showJSON (TrainRequest Nothing ops) = makeObj [("operators", showJSON ops)]
-                                            
-instance JSON TrainingProblem where  
+  showJSON (TrainRequest size ops) = makeObj $ addSize size $ addOps ops $ []
+    where addSize Nothing = id
+          addSize (Just s) = (:) ("size", showJSON s)
+          addOps "" = id
+          addOps ops = (:) ("operators", showJSON [ops])
+
+instance JSON TrainingProblem where
   readJSON (JSObject (fromJSObject -> o)) = do soln <- lookup' "challenge" o
                                                id <- lookup' "id" o
                                                size <- lookup' "size" o
@@ -128,6 +131,11 @@ myProblems = readFile "myproblems.txt" >>= unResult . decode
 -- probably better just to use wget
 reloadProblems :: IO [Problem]
 reloadProblems = rpc "myproblems" $ makeObj []
+
+getProblem :: String -> IO [Problem]
+getProblem prefix = (sortBy (comparing problemSize) . filter pick) `fmap` myProblems
+  where pick p = take (length prefix) (problemId p) == prefix && 
+                 problemTime p /= Just 0
 
 train :: Maybe Int -> String -> IO TrainingProblem
 train n o = rpc "train" $ TrainRequest n o

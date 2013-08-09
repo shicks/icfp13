@@ -26,7 +26,7 @@ generate' :: [String] -> Int -> [Op] -> [Op] -> [Expression]
 generate' vars n rs as 
   | n == 1 && null rs = One : Zero : map Id vars
   | n < 2 = []
-  | TFold `elem` rs && n >= 5 = fold (delete TFold rs) (delete TFold as)
+  | TFold `elem` rs && n >= 5 = tfold (delete TFold rs) (delete TFold as)
   | TFold `elem` rs = [] -- not big enough
   | otherwise = do a <- as
                    case a of
@@ -56,8 +56,13 @@ generate' vars n rs as
                           e0 <- generate' vars n1 [] as'
                           let rs'' = rs' \\ op e0 
                           e1 <- generate' vars n2 [] as'
-                          e2 <- generate' ("y":"z":vars) n3 (rs'' \\ op e1) as'
+                          e2 <- generate' ("y":"z":[] {-vars-}) n3 (rs'' \\ op e1) as'
                           return $ Fold e0 e1 "y" "z" e2
+        tfold rs' as' = do let n3 = n-4
+                               e0 = Id "x"
+                               e1 = Zero
+                           e2 <- generate' ("y":"z":[] {-vars-}) n3 rs' as'
+                           return $ Fold e0 e1 "y" "z" e2
 
 pickInputs :: Int -> IO [Word64]
 pickInputs n = forM [1..n] $ \x -> toWord `fmap` randomRIO (0, (1 `shiftL` 64) - 1)
@@ -81,16 +86,34 @@ solve n os = do t <- train (Just n) os
   where attempt t ss = do is <- (\x -> ss ++ smallInputs 64 ++ x) `fmap` pickInputs 136
                           os <- evalProblem (trainingId t) is
                           let ps = generate (trainingSize t) (trainingOperators t)
-                          putStrLn $ "Possible programs: " ++ show (length ps)
+                          -- putStrLn $ "Possible programs: " ++ show (length ps)
                           let ps' = filter (checkOutputs is os) ps
-                          response <- case ps' of
-                            (sol:_) -> guess (trainingId t) sol
-                            [] -> fail "Empty"
-                          case response of
-                            Win -> return $ Right ()
-                            m@(Mismatch a _ _) -> do print m 
-                                                     return $ Left $ a:ss
-                            r -> fail $ show r
+                          -- putStrLn $ "Filtered programs: " ++ show (length ps')
+                          iterate ps' (is0++is) (os0++os)
+                            where iterate x is os = do
+                                    (sol:rest) <- return x 
+                                    response <- guess (trainingId t) sol
+                                    -- response <- case x of
+                                    --   [] -> fail "Empty"
+                                    --   _ -> return ()
+                                    case response of
+                                      Win -> return $ Right ()
+                                      m@(Mismatch a e _) -> do 
+                                        print m
+                                        let rest' = filter (checkOutputs [a] [e]) rest
+                                        if null rest' then iterate rest' (a:is) (e:os)
+                                          else return $ Left (a:is, e:os)
+                                      r -> fail $ show r
+                          
+                          
+                          -- response <- case ps' of
+                          --   (sol:_) -> guess (trainingId t) sol
+                          --   [] -> fail "Empty"
+                          -- case response of
+                          --   Win -> return $ Right ()
+                          --   m@(Mismatch a _ _) -> do print m 
+                          --                            return $ Left $ a:ss
+                          --   r -> fail $ show r
 
                 -- gr <- case ps' of
                 --   (p:_) -> guess (trainingId t) p
@@ -99,20 +122,31 @@ solve n os = do t <- train (Just n) os
 
 solveReal :: Problem -> IO ()
 solveReal p = do putStrLn $ "Problem: " ++ show p
-                 retry 3 (attempt p []) (attempt p)
-  where attempt p ss = do is <- (\x -> ss ++ smallInputs 64 ++ x) `fmap` pickInputs 136
+                 retry 3 (attempt p ([], [])) (attempt p)
+  where attempt p ss = do let (is0, os0) = ss
+                          is <- if null is0 
+                                then (smallInputs 64 ++) `fmap` pickInputs 190
+                                else pickInputs 250
                           os <- evalProblem (problemId p) is
                           let ps = generate (problemSize p) (problemOperators p)
-                          putStrLn $ "Possible programs: " ++ show (length ps)
+                          -- putStrLn $ "Possible programs: " ++ show (length ps)
                           let ps' = filter (checkOutputs is os) ps
-                          response <- case ps' of
-                            (sol:_) -> guess (problemId p) sol
-                            [] -> fail "Empty"
-                          case response of
-                            Win -> return $ Right ()
-                            m@(Mismatch a _ _) -> do print m 
-                                                     return $ Left $ a:ss
-                            r -> fail $ show r
+                          -- putStrLn $ "Filtered programs: " ++ show (length ps')
+                          iterate ps' (is0++is) (os0++os)
+                            where iterate x is os = do
+                                    (sol:rest) <- return x 
+                                    response <- guess (problemId p) sol
+                                    -- response <- case x of
+                                    --   [] -> fail "Empty"
+                                    --   _ -> return ()
+                                    case response of
+                                      Win -> return $ Right ()
+                                      m@(Mismatch a e _) -> do 
+                                        print m
+                                        let rest' = filter (checkOutputs [a] [e]) rest
+                                        if null rest' then iterate rest' (a:is) (e:os)
+                                          else return $ Left (a:is, e:os)
+                                      r -> fail $ show r
 
 -- How would we solve something by hand?
 -- 1. what sequence of bits are in common?
