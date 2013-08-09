@@ -99,8 +99,8 @@ solve n os = do t <- train (Just n) os
 
 solveReal :: Problem -> IO ()
 solveReal p = do putStrLn $ "Problem: " ++ show p
-                 retry 3 (attempt t []) (attempt t)
-  where attempt t ss = do is <- (\x -> ss ++ smallInputs 64 ++ x) `fmap` pickInputs 136
+                 retry 3 (attempt p []) (attempt p)
+  where attempt p ss = do is <- (\x -> ss ++ smallInputs 64 ++ x) `fmap` pickInputs 136
                           os <- evalProblem (problemId p) is
                           let ps = generate (problemSize p) (problemOperators p)
                           putStrLn $ "Possible programs: " ++ show (length ps)
@@ -113,7 +113,7 @@ solveReal p = do putStrLn $ "Problem: " ++ show p
                             m@(Mismatch a _ _) -> do print m 
                                                      return $ Left $ a:ss
                             r -> fail $ show r
-                 
+
 -- How would we solve something by hand?
 -- 1. what sequence of bits are in common?
 -- 2. what pair of sequences can be xor'd/and'd/or'd to be in common?

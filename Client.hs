@@ -125,6 +125,10 @@ auth = "03322ZfXM9y7bAmubitseHsbGtSyUBS8Uqvv9YmBvpsH1H"
 myProblems :: IO [Problem]
 myProblems = readFile "myproblems.txt" >>= unResult . decode
 
+-- probably better just to use wget
+reloadProblems :: IO [Problem]
+reloadProblems = rpc "myproblems" $ makeObj []
+
 train :: Maybe Int -> String -> IO TrainingProblem
 train n o = rpc "train" $ TrainRequest n o
 
