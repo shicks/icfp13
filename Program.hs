@@ -3,12 +3,14 @@
 module Program where
 
 import Data.Bits ( (.&.), (.|.), complement, shiftL, shiftR, xor )
-import Data.Int ( Int64 )
 import Data.List ( nub, sort )
-import Text.ParserCombinators.Parsec ( Parser,
-                                       choice, letter, many1,
-                                       parse, spaces, string, try, 
-                                       getPosition, sourceColumn )
+import Data.Maybe ( fromJust )
+import Data.Word ( Word64 )
+import Text.ParserCombinators.Parsec ( Parser, (<|>),
+                                       char, choice, digit, letter, 
+                                       many, many1, parse, spaces, 
+                                       string, try, getPosition, 
+                                       sourceColumn )
 
 data Program = P { param :: String, unP ::  Expression }
              deriving ( Eq, Ord )
@@ -37,13 +39,12 @@ instance Show Expression where
   show (Op2 op e0 e1) = "(" ++ show op ++ " " ++ show e0 ++ " " ++ show e1 ++ ")"
 
 instance Show Op1 where
-  show op = snd $ head $ filter ((==op) . fst) [(Not, "not"), (Shl1, "shl1"),
-                                                (Shr1, "shr1"), (Shr4, "shr4"),
-                                                (Shr16, "shr16")]
+  show op = fromJust $ lookup op [(Not, "not"), (Shl1, "shl1"), (Shr1, "shr1"), 
+                                  (Shr4, "shr4"), (Shr16, "shr16")]
 
 instance Show Op2 where
-  show op = snd $ head $ filter ((==op) . fst) [(And, "and"), (Or, "or"),
-                                                (Xor, "xor"), (Plus, "plus")]
+  show op = fromJust $ lookup op [(And, "and"), (Or, "or"),
+                                  (Xor, "xor"), (Plus, "plus")]
 
 instance Read Program where
   readsPrec _ s = case parse (do p <- parseProgram    -- arrows?
@@ -52,15 +53,15 @@ instance Read Program where
                     Right (pos, p) -> [(p, drop (sourceColumn pos - 1) s)]
                     Left err -> error $ show err
 
-bytes :: Int64 -> [Int64]
+bytes :: Word64 -> [Word64]
 bytes = take 8 . drop 1 . map fst . iterate next . (0,)
   where next (a, b) = (b .&. 0xff, b `shiftR` 8)
 
-evaluate :: Program -> Int64 -> Int64
+evaluate :: Program -> Word64 -> Word64
 evaluate (P s e) x = evaluate' [(s, x)] e
   where evaluate' _ Zero = 0
         evaluate' _ One = 1
-        evaluate' v (Id s') = snd $ head $ filter ((== s') . fst) v
+        evaluate' v (Id s') = fromJust $ lookup s' v
         evaluate' v (If0 c t f) = if evaluate' v c == 0 
                                   then evaluate' v t 
                                   else evaluate' v f
@@ -70,14 +71,14 @@ evaluate (P s e) x = evaluate' [(s, x)] e
         evaluate' v (Op1 op e) = op1 op $ evaluate' v e
         evaluate' v (Op2 op y z) = op2 op (evaluate' v y) (evaluate' v z)
 
-op1 :: Op1 -> Int64 -> Int64
+op1 :: Op1 -> Word64 -> Word64
 op1 Not = complement
 op1 Shl1 = flip shiftL 1
 op1 Shr1 = flip shiftR 1
 op1 Shr4 = flip shiftR 4
 op1 Shr16 = flip shiftR 16
 
-op2 :: Op2 -> Int64 -> Int64 -> Int64
+op2 :: Op2 -> Word64 -> Word64 -> Word64
 op2 And = (.&.)
 op2 Or = (.|.)
 op2 Xor = xor
@@ -114,7 +115,7 @@ parseProgram :: Parser Program
 parseProgram = do string "(" >> spaces
                   string "lambda" >> spaces
                   string "(" >> spaces
-                  s <- many1 letter
+                  s <- word
                   spaces >> string ")" >> spaces
                   e <- parseExpr
                   spaces >> string ")"
@@ -123,7 +124,7 @@ parseProgram = do string "(" >> spaces
 parseExpr :: Parser Expression
 parseExpr = choice $ map try $ [string "0" >> return Zero,
                                 string "1" >> return One,
-                                Id `fmap` many1 letter,
+                                Id `fmap` word,
                                 do string "(" >> spaces >> string "if0"
                                    c <- spaces >> parseExpr
                                    t <- spaces >> parseExpr
@@ -135,8 +136,8 @@ parseExpr = choice $ map try $ [string "0" >> return Zero,
                                    e1 <- spaces >> parseExpr
                                    spaces >> string "(" >> spaces
                                    string "lambda" >> spaces >> string "("
-                                   id0 <- spaces >> many1 letter
-                                   id1 <- spaces >> many1 letter
+                                   id0 <- spaces >> word
+                                   id1 <- spaces >> word
                                    spaces >> string ")"
                                    e2 <- spaces >> parseExpr
                                    spaces >> string ")" >> spaces >> string ")"
@@ -153,7 +154,12 @@ parseExpr = choice $ map try $ [string "0" >> return Zero,
                                    spaces >> string ")"
                                    return $ Op2 op e0 e1]
 
+word :: Parser String
+word = do c <- letter <|> char '_'
+          cs <- many $ letter <|> digit <|> char '_'
+          return $ c:cs
+
 parseEnum :: (Bounded a, Enum a, Show a) => Parser a
-parseEnum = try $ do w <- many1 letter
+parseEnum = try $ do w <- word
                      (a:[]) <- return $ filter ((==w) . show) [minBound..maxBound]
                      return a
