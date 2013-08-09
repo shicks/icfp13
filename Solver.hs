@@ -88,7 +88,9 @@ solve n os = do t <- train (Just n) os
                             [] -> fail "Empty"
                           case response of
                             Win -> return $ Right ()
-                            Mismatch a _ _ -> return $ Left $ a:ss
+                            m@(Mismatch a _ _) -> do print m 
+                                                     return $ Left $ a:ss
+                            r -> fail $ show r
 
                 -- gr <- case ps' of
                 --   (p:_) -> guess (trainingId t) p
@@ -97,17 +99,20 @@ solve n os = do t <- train (Just n) os
 
 solveReal :: Problem -> IO ()
 solveReal p = do putStrLn $ "Problem: " ++ show p
-                 is <- pickInputs 200
-                 os <- evalProblem (problemId p) is
-                 let ps = generate (problemSize p) (problemOperators p)
-                 putStrLn $ "Possible programs: " ++ show (length ps)
-                 let ps' = filter (checkOutputs is os) ps
-                 response <- case ps' of
-                   (sol:_) -> guess (problemId p) sol
-                   [] -> fail "Empty"
-                 case response of
-                   Win -> return ()
-                   _ -> fail $ show response
+                 retry 3 (attempt t []) (attempt t)
+  where attempt t ss = do is <- (\x -> ss ++ smallInputs 64 ++ x) `fmap` pickInputs 136
+                          os <- evalProblem (problemId p) is
+                          let ps = generate (problemSize p) (problemOperators p)
+                          putStrLn $ "Possible programs: " ++ show (length ps)
+                          let ps' = filter (checkOutputs is os) ps
+                          response <- case ps' of
+                            (sol:_) -> guess (problemId p) sol
+                            [] -> fail "Empty"
+                          case response of
+                            Win -> return $ Right ()
+                            m@(Mismatch a _ _) -> do print m 
+                                                     return $ Left $ a:ss
+                            r -> fail $ show r
                  
 -- How would we solve something by hand?
 -- 1. what sequence of bits are in common?
