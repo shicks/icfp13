@@ -4,11 +4,18 @@ module Client where
 
 import Program
 
+import Control.Concurrent( threadDelay )
+import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
 import Debug.Trace ( trace )
 import Data.Char ( toUpper )
+import Data.Either ( partitionEithers )
+import Data.List ( intercalate )
 import Data.Word ( Word64 )
 import Network.HTTP ( Response(..), postRequestWithBody, simpleHTTP )
 import Numeric ( showHex )
+import System.IO.Error ( catchIOError, ioError )
+import System.IO.Unsafe ( unsafePerformIO )
+import System.Time ( ClockTime(..), getClockTime )
 import Text.JSON ( JSObject, JSON(..), JSValue(..), Result(..),
                    decode, encode, fromJSObject, makeObj )
 
@@ -47,9 +54,12 @@ instance JSON EvalResponse where
   readJSON (JSObject (fromJSObject -> o)) = 
     do status <- lookup' "status" o
        case status of
-         "ok" -> (EvalOk . map read . tr "resp") `fmap` lookup' "outputs" o
+         "ok" -> (evalOk . map parseNum) `fmap` lookup' "outputs" o
          "error" -> EvalError `fmap` lookup' "message" o
          _ -> fail $ "Unknown status: " ++ status
+    where evalOk outs | ([], words) <- partitionEithers outs = EvalOk words
+                      | (errs, _) <- partitionEithers outs = EvalError $ 
+                                                             intercalate "," errs
   showJSON _ = error "No need to serialize an EvalResponse"
 
 data Guess = Guess String String
@@ -67,7 +77,12 @@ instance JSON GuessResponse where
        case status of
          "win" -> return Win
          "mismatch" -> do (arg, expected, actual) <- lookup' "values" o
-                          return $ Mismatch arg expected actual
+                          return $ case do arg' <- parseNum arg
+                                           exp' <- parseNum expected
+                                           act' <- parseNum actual
+                                           return $ Mismatch arg' exp' act'
+                                   of Right m -> m
+                                      Left e -> GuessError e
          "error" -> GuessError `fmap` lookup' "message" o
          _ -> fail $ "Unknown status: " ++ status
   showJSON _ = error "No need to serialize a GuessResponse"
@@ -100,6 +115,9 @@ instance JSON TrainingProblem where
                                                return $ TrainingProblem soln id size ops
   showJSON _ = error "No need to serialize a TrainingProblem"
 
+solution :: TrainingProblem -> Program
+solution = read . trainingChallenge 
+
 auth :: String
 auth = "03322ZfXM9y7bAmubitseHsbGtSyUBS8Uqvv9YmBvpsH1H"
 
@@ -107,8 +125,8 @@ auth = "03322ZfXM9y7bAmubitseHsbGtSyUBS8Uqvv9YmBvpsH1H"
 myProblems :: IO [Problem]
 myProblems = readFile "myproblems.txt" >>= unResult . decode
 
-train :: TrainRequest -> IO TrainingProblem
-train = rpc "train"
+train :: Maybe Int -> String -> IO TrainingProblem
+train n o = rpc "train" $ TrainRequest n o
 
 toProblem :: TrainingProblem -> Problem
 toProblem (TrainingProblem _ i s o) = Problem i s o Nothing Nothing
@@ -130,15 +148,56 @@ guess id p = rpc "guess" $ Guess id $ show p
 
 -- UTILITY
 
+microTime :: IO Integer
+microTime = do TOD secs picos <- getClockTime
+               return $ secs * 1000000 + picos `div` 1000000
+
+data RateLimiter = RateLimiter (IORef Integer)
+rateLimit :: Integer -> RateLimiter -> IO ()
+rateLimit micros (RateLimiter ref) = do last <- readIORef ref
+                                        now <- microTime
+                                        if last + micros > now
+                                           then threadDelay $ fromIntegral $ 
+                                                last + micros - now
+                                           else return ()
+                                        microTime >>= writeIORef ref
+
+rateLimiter :: IORef RateLimiter
+rateLimiter = unsafePerformIO $ newIORef 0 >>= newIORef . RateLimiter
+
+wait :: Integer -> IO ()
+wait seconds = do limiter <- readIORef rateLimiter
+                  rateLimit (seconds * 1000000) limiter
+
+retry :: Show b => Int -> IO (Either b a) -> (b -> IO (Either b a)) -> IO a
+retry 0 _ _ = fail "No retries specified"
+retry 1 first _ = do out <- first
+                     case out of
+                       Right a -> return a
+                       Left b -> fail $ show b
+retry n first later = do out <- catchIOError first $ 
+                                \e -> Right `fmap` retry (n-1) first later
+                         case out of
+                           Right a -> return a
+                           Left b -> retry (n-1) (later b) later
+
 rpc :: (JSON i, JSON o) => String -> i -> IO o
-rpc path req = do result <- simpleHTTP $ postRequestWithBody url contentType body
-                  case result of
-                    Right resp -> case rspCode resp of
-                      (2, 0, 0) -> case decode $ rspBody resp of
-                        Ok obj -> return obj
-                        Error e -> fail e
-                      _ -> fail $ rspReason resp
-                    Left e -> fail $ show e
+rpc path req = rpc'' 3
+  where rpc'' retries = catchIOError (wait 5 >> rpc' path req) $
+                        \e -> if retries == 0 then ioError e
+                                              else do putStrLn $ "Retrying: " ++ show e
+                                                      wait 15
+                                                      rpc'' (retries - 1)
+
+rpc' :: (JSON i, JSON o) => String -> i -> IO o
+rpc' path req = do result <- simpleHTTP $ postRequestWithBody url contentType body
+                   case result of
+                     Right resp -> case rspCode resp of
+                       (2, 0, 0) -> case decode $ rspBody resp of
+                         Ok obj -> return obj
+                         Error e -> fail e
+                       _ -> fail $ rspReason resp
+                     Left e -> fail $ show e
   where url = "http://icfpc2013.cloudapp.net/" ++ path ++ "?auth=" ++ auth
         contentType = "application/json"
         body = encode $ showJSON req

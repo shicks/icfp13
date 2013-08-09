@@ -7,17 +7,18 @@ import Debug.Trace ( trace )
 import Client
 import Program
 
-import Control.Monad ( forM )
-import Data.Bits ( shiftL )
-import Data.List ( (\\), delete, replicate, union )
+import Control.Monad ( forM, forM_ )
+import Data.Bits ( Bits, (.&.), shiftL, shiftR, shift, xor )
+import Data.List ( (\\), delete, replicate, sortBy, union )
 import Data.Maybe ( fromJust )
+import Data.Ord ( comparing )
 import Data.Word ( Word64 )
 import System.Random ( Random(..), RandomGen(..) )
 import Text.ParserCombinators.Parsec ( parse )
 
-generate :: Problem -> [Program]
-generate (Problem _ s o _ _) = do e <- generate' ["x"] (s-1) ops ops
-                                  return $ P "x" e
+generate :: Int -> [String] -> [Program]
+generate s o = do e <- generate' ["x"] (s-1) ops ops
+                  return $ P "x" e
   where ops = map (fromJust . parseOp) o
 
 -- Generates a list of all possible programs
@@ -63,20 +64,120 @@ pickInputs n = forM [1..n] $ \x -> toWord `fmap` randomRIO (0, (1 `shiftL` 64) -
   where toWord :: Integer -> Word64
         toWord = fromIntegral
 
+smallInputs :: Int -> [Word64]
+smallInputs n = [0..fromIntegral n]
+
 checkOutputs :: [Word64] -> [Word64] -> Program -> Bool
 checkOutputs [] [] _ = True
 checkOutputs (i:is) (o:os) p | evaluate p i == o = checkOutputs is os p
                              | otherwise = False
 
-solve :: Int -> String -> IO (TrainingProblem, [Word64], [Word64], GuessResponse)
-solve n os = do t <- train $ TrainRequest (Just n) os
+solve :: Int -> String -> IO () -- (TrainingProblem, [Word64], [Word64], GuessResponse)
+solve n os = do t <- train (Just n) os
                 putStrLn $ "Problem id: " ++ trainingId t
-                is <- pickInputs 200
-                os <- evalProblem (trainingId t) is
-                let ps = generate $ toProblem t
-                putStrLn $ "Possible programs: " ++ show (length ps)
-                let ps' = filter (checkOutputs is os) ps
-                gr <- if null ps'
-                        then return $ GuessError "Empty"
-                        else guess (trainingId t) $ head ps'
-                return (t, is, os, gr)
+                putStrLn $ "Problem size: " ++ show (trainingSize t)
+                putStrLn $ "Problem operators: " ++ show (trainingOperators t)
+                retry 3 (attempt t []) (attempt t)
+  where attempt t ss = do is <- (\x -> ss ++ smallInputs 64 ++ x) `fmap` pickInputs 136
+                          os <- evalProblem (trainingId t) is
+                          let ps = generate (trainingSize t) (trainingOperators t)
+                          putStrLn $ "Possible programs: " ++ show (length ps)
+                          let ps' = filter (checkOutputs is os) ps
+                          response <- case ps' of
+                            (sol:_) -> guess (trainingId t) sol
+                            [] -> fail "Empty"
+                          case response of
+                            Win -> return $ Right ()
+                            Mismatch a _ _ -> return $ Left $ a:ss
+
+                -- gr <- case ps' of
+                --   (p:_) -> guess (trainingId t) p
+                --   []    -> return $ GuessError "Empty"
+                -- return (t, is, os, gr)
+
+solveReal :: Problem -> IO ()
+solveReal p = do putStrLn $ "Problem: " ++ show p
+                 is <- pickInputs 200
+                 os <- evalProblem (problemId p) is
+                 let ps = generate (problemSize p) (problemOperators p)
+                 putStrLn $ "Possible programs: " ++ show (length ps)
+                 let ps' = filter (checkOutputs is os) ps
+                 response <- case ps' of
+                   (sol:_) -> guess (problemId p) sol
+                   [] -> fail "Empty"
+                 case response of
+                   Win -> return ()
+                   _ -> fail $ show response
+                 
+-- How would we solve something by hand?
+-- 1. what sequence of bits are in common?
+-- 2. what pair of sequences can be xor'd/and'd/or'd to be in common?
+-- 3. what bits are missing ?
+-- 4. prefer longer runs?
+
+-- What kind of output is it producing?  Are there any higher-order bits at all?
+
+
+(.<<.), (.>>.) :: (Bits a) => a -> Int -> a
+(.<<.) = shiftL
+(.>>.) = shiftR
+for = flip map
+
+findOnes :: Word64 -> [Int]
+findOnes = findOnes' 0
+  where findOnes' _ 0 = []
+        findOnes' n x | x .&. 1 == 1 = n:findOnes' (n+1) (x.>>.1)
+                      | otherwise = findOnes' (n+1) (x.>>.1)
+
+proximity :: Word64 -> Word64 -> Int
+proximity a b = 64 - length (findOnes $ a `xor` b `xor` 1)
+
+tryP :: [Word64] -> [Word64] -> Program -> Int
+tryP is os p = sum $ map (\(i, o) -> proximity (evaluate p i) o) $ zip is os
+
+maybeNot :: [Expression -> Expression]
+maybeNot = [id, Op1 Not]
+
+explore :: [Word64] -> [Word64] -> [(Program, Int)]
+explore is os = reverse $ sortBy (comparing snd) $ explore 1
+  where opt :: Expression -> (Program, Int)
+        opt e = let p = P "x" e in (p, tryP is os p)
+        x :: Expression
+        x = Id "x"
+        explore :: Int -> [(Program, Int)]
+        explore 1 = do n <- [-63..63]
+                       return $ opt $ Shift n x
+        explore 2 = do n <- [-63..63]
+                       m <- [-63..63]
+                       op <- [And, Or, Xor, Plus]
+                       return $ opt $ Op2 op (Shift n x) (Shift m x)
+
+flipBit :: Int -> Word64 -> Word64
+flipBit b x = x `xor` (1 .<<. b)
+
+difference :: Word64 -> Word64 -> [Int]
+difference = d' 0
+  where d' n 0 0 = []
+        d' n i o | i .&. 1 /= o .&. 1 = n : d' (n+1) (i.>>.1) (o.>>.1)
+                 | otherwise = d' (n+1) (i.>>.1) (o.>>.1)
+
+checkBit :: Program -> Int -> Word64 -> Bool
+checkBit p b x = checkBit' p (evaluate p x) b x
+
+-- | partially applied for efficiency so we don't keep checking 0
+checkBit' :: Program -> Word64 -> Int -> Word64 -> Bool
+checkBit' p x0 b x = evaluate p (flipBit b x) /= x0
+
+checkBits :: Program -> Word64 -> [(Int, [Int])]
+checkBits p x = let y0 = evaluate p x
+                in do b <- [0..63]
+                      let y1 = evaluate p (flipBit b x)
+                      case difference y0 y1 of
+                        [] -> fail ""
+                        bs -> return (b, bs)
+
+-- explore :: [Word64] -> [Word64] -> IO ()
+-- explore is os = do forM_ [1..64] $ \n -> do
+                     
+--                      print $ findOnes $ (i .<<. n) `xor` i `xor` maxBound
+                   

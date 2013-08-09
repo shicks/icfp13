@@ -2,14 +2,15 @@
 
 module Program where
 
-import Data.Bits ( (.&.), (.|.), complement, shiftL, shiftR, xor )
+import Data.Bits ( (.&.), (.|.), complement, shift, shiftL, shiftR, xor )
+import Data.Char ( ord, toLower )
 import Data.List ( nub, sort )
 import Data.Maybe ( fromJust )
 import Data.Word ( Word64 )
-import Text.ParserCombinators.Parsec ( Parser, (<|>),
-                                       char, choice, digit, letter, 
-                                       many, many1, parse, spaces, 
-                                       string, try, getPosition, 
+import Text.ParserCombinators.Parsec ( Parser, (<|>), oneOf,
+                                       char, choice, digit, letter,
+                                       many, many1, parse, spaces,
+                                       string, try, getPosition,
                                        sourceColumn )
 
 data Program = P { param :: String, unP ::  Expression }
@@ -19,6 +20,7 @@ data Expression = Zero | One | Id String
                 | Fold Expression Expression String String Expression
                 | Op1 Op1 Expression
                 | Op2 Op2 Expression Expression
+                | Shift Int Expression
                 deriving ( Eq, Ord )
 data Op1 = Not | Shl1 | Shr1 | Shr4 | Shr16
          deriving ( Bounded, Eq, Enum, Ord )
@@ -40,6 +42,7 @@ instance Show Expression where
                                         " (lambda (", x, " ", y, ") ", show e, "))"]
   show (Op1 op e) = "(" ++ show op ++ " " ++ show e ++ ")"
   show (Op2 op e0 e1) = "(" ++ show op ++ " " ++ show e0 ++ " " ++ show e1 ++ ")"
+  show (Shift n e) = "(shift " ++ show n ++ " " ++ show e ++ ")"
 
 instance Show Op1 where
   show op = fromJust $ lookup op [(Not, "not"), (Shl1, "shl1"), (Shr1, "shr1"), 
@@ -80,6 +83,7 @@ evaluate (P s e) x = evaluate' [(s, x)] e
           where f y z = evaluate' ((sy, y):(sz, z):v) accum
         evaluate' v (Op1 op e) = op1 op $ evaluate' v e
         evaluate' v (Op2 op y z) = op2 op (evaluate' v y) (evaluate' v z)
+        evaluate' v (Shift n e) = shift (evaluate' v e) n
 
 op1 :: Op1 -> Word64 -> Word64
 op1 Not = complement
@@ -167,7 +171,12 @@ parseExpr = choice $ map try $ [string "0" >> return Zero,
                                    e0 <- spaces >> parseExpr
                                    e1 <- spaces >> parseExpr
                                    spaces >> string ")"
-                                   return $ Op2 op e0 e1]
+                                   return $ Op2 op e0 e1,
+                                do string "(" >> spaces >> string "shift"
+                                   n <- spaces >> number
+                                   e <- spaces >> parseExpr
+                                   spaces >> string ")"
+                                   return $ Shift n e]
 
 allEnums :: (Bounded a, Enum a) => [a]
 allEnums = [minBound .. maxBound]
@@ -176,6 +185,29 @@ word :: Parser String
 word = do c <- letter <|> char '_'
           cs <- many $ letter <|> digit <|> char '_'
           return $ c:cs
+
+number :: Num a => Parser a
+number = choice [do char '-' 
+                    n <- number
+                    return $ -n,
+                 try $ do string "0x"
+                          ds <- many1 hexDigit
+                          return $ foldr (\a b -> 16 * b + a) 0 $ reverse ds,
+                 try $ do ds <- many1 decDigit
+                          return $ foldr (\a b -> 10 * b + a) 0 $ reverse ds]
+
+hexDigit :: Num a => Parser a
+hexDigit = fromIntegral `fmap` 
+           choice [decDigit,
+                   fmap (\x -> ord x - ord 'A' + 10) $ oneOf "ABCDEF",
+                   fmap (\x -> ord x - ord 'a' + 10) $ oneOf "abcdef"]
+
+decDigit :: Num a => Parser a
+decDigit = fromIntegral `fmap` fmap (\x -> ord x - ord '0') digit
+
+parseNum :: Num a => String -> Either String a
+parseNum s = case parse number "" s of Right n -> Right n
+                                       Left e -> Left $ show e
 
 parseEnum :: (Bounded a, Enum a, Show a) => Parser a
 parseEnum = try $ do w <- word
