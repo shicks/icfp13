@@ -76,7 +76,7 @@ evaluate (P s e) x = evaluate' [(s, x)] e
                                   then evaluate' v t 
                                   else evaluate' v f
         evaluate' v (Fold arg start sy sz accum) = foldr f (evaluate' v start) $ 
-                                                   bytes $ evaluate' v arg
+                                                   reverse $ bytes $ evaluate' v arg
           where f y z = evaluate' ((sy, y):(sz, z):v) accum
         evaluate' v (Op1 op e) = op1 op $ evaluate' v e
         evaluate' v (Op2 op y z) = op2 op (evaluate' v y) (evaluate' v z)
