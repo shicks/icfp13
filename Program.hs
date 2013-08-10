@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TupleSections, ViewPatterns #-}
 
 module Program where
 
@@ -24,6 +24,7 @@ data Expression = Zero | One | Id String
                 | Op1 Op1 Expression
                 | Op2 Op2 Expression Expression
                 | Shift Int Expression
+                | Const Word64
                 deriving ( Eq, Ord )
 data Op1 = Not | Shl1 | Shr1 | Shr4 | Shr16
          deriving ( Bounded, Eq, Enum, Ord )
@@ -69,6 +70,7 @@ instance Show Expression where
   show (Op1 op e) = "(" ++ show op ++ " " ++ show e ++ ")"
   show (Op2 op e0 e1) = "(" ++ show op ++ " " ++ show e0 ++ " " ++ show e1 ++ ")"
   show (Shift n e) = "(shift " ++ show n ++ " " ++ show e ++ ")"
+  show (Const x) = show x
 
 instance Show Op1 where
   show op = fromJust $ lookup op [(Not, "not"), (Shl1, "shl1"), (Shr1, "shr1"), 
@@ -110,6 +112,7 @@ instance IsProgram Program where
           evaluate' v (Op1 op e) = op1 op $ evaluate' v e
           evaluate' v (Op2 op y z) = op2 op (evaluate' v y) (evaluate' v z)
           evaluate' v (Shift n e) = shift (evaluate' v e) n
+          evaluate' _ (Const x) = x
 
 op1 :: Op1 -> Word64 -> Word64
 op1 Not = complement
@@ -247,3 +250,82 @@ parseOp s = lookup s [("not", Unary Not), ("shl1", Unary Shl1),
                       ("or", Binary Or), ("xor", Binary Xor),
                       ("plus", Binary Plus), ("if0", Cond),
                       ("fold", CFold), ("tfold", TFold)]
+
+isConst :: Expression -> Maybe Word64
+isConst e = if ic e
+            then Just $ evaluate (P "x" e) 0 
+            else Nothing
+  where ic Zero = True
+        ic One = True
+        ic (Const _) = True
+        ic (Id _) = False
+        ic (Op1 _ e) = ic e
+        ic (Shift _ e) = ic e
+        ic (Op2 _ e0 e1) = ic e0 && ic e1
+        ic (If0 c t f) | Just x <- isConst c = if x == 0 then ic t else ic f
+                       | Just x <- isConst t = t == f
+                       | otherwise = False
+        ic (Fold e0 e1 x y e2) = ic e0 && ic e1
+
+canonicalize :: Program -> Program
+canonicalize (P s e) = P "x" $ c' [(s, "x")] e
+  where c' _ One = One
+        c' _ Zero = Zero
+        c' v (Id x) = Id $ fromJust $ lookup x v
+        c' v (Op1 op e) = Op1 op (c' v e)
+        c' v (Op2 op e0 e1) = Op2 op (c' v e0) (c' v e1)
+        c' v (If0 c t f) = If0 (c' v c) (c' v t) (c' v f)
+        c' v (Fold e0 e1 x y e2) = Fold (c' v e0) (c' v e1) "x" "y" 
+                                   (c' ((x,"x"):(y,"y"):v) e2)
+        c' v (Shift 0 e) = c' v e
+        c' v (Shift n e) | n > 0 = Op1 Shl1 (c' v (Shift (n-1) e))
+        c' v (Shift n e) | n <= -16 = Op1 Shr16 (c' v (Shift (n+16) e))
+        c' v (Shift n e) | n <= -4 = Op1 Shr4 (c' v (Shift (n+4) e))
+        c' v (Shift n e) | n < 0 = Op1 Shr1 (c' v (Shift (n+1) e))
+        c' _ (Const 0) = Zero
+        c' _ (Const 1) = One
+        c' v (Const x) | complement x < x = Op1 Not $ c' v $ Const $ complement x
+                       | x .&. 1 == 1 = Op2 Or One $ Op1 Shl1 $ c' v $ Const $ x `shiftR` 1
+                       | otherwise = Op1 Shl1 $ c' v $ Const $ x `shiftR` 1
+
+reduce :: Program -> Program
+reduce (P s e) = let e' = reduce2 e
+                 in if e' == e
+                    then P s e' 
+                    else reduce $ P s e'
+  where reduce2 e = case isConst e of
+          Just x -> Const x
+          Nothing -> reduce1 e
+        reduce1 :: Expression -> Expression
+        reduce1 (Fold e0 e1 x y e2) = Fold (reduce2 e0) (reduce2 e1) x y (reduce2 e2)
+        reduce1 (If0 c (Op1 Not t) (Op1 Not f)) = Op1 Not $ If0 (reduce2 c) 
+                                                  (reduce2 t) (reduce2 f)
+        reduce1 (If0 c t f) | t == f = reduce2 t
+        reduce1 (If0 c t f) | otherwise = If0 (reduce2 c) (reduce2 t) (reduce2 f)
+        reduce1 One = Const 1
+        reduce1 Zero = Const 0
+        reduce1 (Op1 Shl1 e) = Shift 1 (reduce2 e)
+        reduce1 (Op1 Shr1 e) = Shift (-1) (reduce2 e)
+        reduce1 (Op1 Shr4 e) = Shift (-4) (reduce2 e)
+        reduce1 (Op1 Shr16 e) = Shift (-16) (reduce2 e)
+        reduce1 (Op1 Not (Op1 Not e)) = reduce2 e
+        reduce1 (Op1 Not e) = Op1 Not (reduce2 e)
+        reduce1 (Op2 op e1 e2) | e1 > e2 = reduce2 (Op2 op e2 e1)
+        reduce1 (Op2 And (Op1 Not e1) (Op1 Not e2)) = Op1 Not (Op2 Or (reduce2 e1) 
+                                                               (reduce2 e2))
+        reduce1 (Op2 Or (Op1 Not e1) (Op1 Not e2)) = Op1 Not (Op2 And (reduce2 e1) 
+                                                              (reduce2 e2))
+        reduce1 (Op2 And (Op2 And e1 e2) e3) | e2 == e3 = Op2 And e1 e2
+        reduce1 (Op2 And e1 (Op2 And e2 e3)) | e1 == e2 = Op2 And e2 e3
+        reduce1 (Op2 And e1 e2) | e1 == e2 = e1
+        reduce1 (Op2 Or (Op2 Or e1 e2) e3) | e2 == e3 = Op2 Or e1 e2
+        reduce1 (Op2 Or e1 (Op2 Or e2 e3)) | e1 == e2 = Op2 Or e2 e3
+        reduce1 (Op2 Or e1 e2) | e1 == e2 = e1
+        reduce1 (Op2 Or e (Const 0)) = e
+        reduce1 (Op2 Xor e (Const 0)) = e
+        reduce1 (Op2 Xor e0 e1) | e0 == e1 = Const 0
+        reduce1 (Op2 And e (Const (complement -> 0))) = e
+        reduce1 (Op2 op e0 e1) = Op2 op (reduce2 e0) (reduce2 e1)
+        reduce1 (Shift n (Shift m e)) | m * n > 0 = Shift (m + n) e
+        reduce1 (Shift n e) = Shift n (reduce2 e)
+        reduce1 x = x

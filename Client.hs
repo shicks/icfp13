@@ -91,7 +91,7 @@ instance JSON GuessResponse where
 instance Show GuessResponse where
   show Win = "Win"
   show (Mismatch arg expected actual) = "Mismatch: P(" ++ show arg ++ ") = " ++ 
-                                        show expected ++ " but you got " ++ show actual
+                                        toHex expected ++ " but you got " ++ toHex actual
   show (GuessError msg) = "GuessError " ++ msg
 
 data TrainRequest = TrainRequest (Maybe Int) String

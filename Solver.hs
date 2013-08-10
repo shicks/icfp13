@@ -219,6 +219,9 @@ explore is os = reverse $ sortBy (comparing snd) $ explore 1
 flipBit :: Int -> Word64 -> Word64
 flipBit b x = x `xor` (1 .<<. b)
 
+getBit :: Int -> Word64 -> Bool
+getBit b x = (x .&. (1 .<<. b)) /= 0
+
 difference :: Word64 -> Word64 -> [Int]
 difference = d' 0
   where d' n 0 0 = []
@@ -327,15 +330,15 @@ instance Show Table where
                                            | otherwise = "   " ++ terms cs t
           terms (c:cs) [] = ""
           showCell ds = if all snd ds 
-                        then " + " else if any (not . snd) ds
+                        then " + " else if not (any snd ds)
                                         then " ~ " else " ? "
 
-differenceT :: Word64 -> Word64 -> Word64 -> [(Int, Bool)]
-differenceT ii' = d' 0 ii'
-  where d' n _ 0 0 = []
-        d' n i' i o | i .&. 1 /= o .&. 1 = (n, i'.&.1 == o.&.1)
-                                           : d' (n+1) (i'.>>.1) (i.>>.1) (o.>>.1)
-                    | otherwise = d' (n+1) (i'.>>.1) (i.>>.1) (o.>>.1)
+differenceT :: Bool -> Word64 -> Word64 -> [(Int, Bool)]
+differenceT b = d' 0
+  where d' n 0 0 = []
+        d' n i o | i .&. 1 /= o .&. 1 = (n, b == (0 /= o.&.1))
+                                        : d' (n+1) (i.>>.1) (o.>>.1)
+                 | otherwise = d' (n+1) (i.>>.1) (o.>>.1)
 
 checkBits :: IsProgram p => p -> Word64 -> Table
 checkBits p x = Table $ sortBy (comparing fst) $
@@ -343,8 +346,12 @@ checkBits p x = Table $ sortBy (comparing fst) $
                 in do b <- [0..63]
                       let x1 = flipBit b x
                           y1 = evaluate p x1
-                      (c, r) <- differenceT x1 y0 y1
+                      (c, r) <- differenceT (getBit b x1) y0 y1
                       return ((c, b), [(x, r)])
+
+buildTable :: IsProgram p => p -> IO Table
+buildTable p = do is <- pickInputs 100
+                  return $ mconcat $ map (checkBits p) (0:is)
 
 -- explore :: [Word64] -> [Word64] -> IO ()
 -- explore is os = do forM_ [1..64] $ \n -> do
