@@ -118,6 +118,9 @@ instance JSON TrainingProblem where
                                                return $ TrainingProblem soln id size ops
   showJSON _ = error "No need to serialize a TrainingProblem"
 
+instance IsProgram TrainingProblem where
+  evaluate = evaluate . solution
+
 solution :: TrainingProblem -> Program
 solution = read . trainingChallenge 
 
@@ -180,6 +183,19 @@ rateLimiter = unsafePerformIO $ newIORef 0 >>= newIORef . RateLimiter
 wait :: Integer -> IO ()
 wait seconds = do limiter <- readIORef rateLimiter
                   rateLimit (seconds * 1000000) limiter
+
+time :: IO a -> IO a
+time action = do before <- microTime
+                 result <- catchIOError action $
+                           \e -> do after <- microTime
+                                    putStrLn $ "Elapsed time: " ++
+                                      show (fromIntegral (after - before) / 1000000) ++ 
+                                      " seconds"
+                                    ioError e
+                 after <- microTime
+                 putStrLn $ "Elapsed time: " ++ 
+                   show (fromIntegral (after - before) / 1000000) ++ " seconds"
+                 return result
 
 retry :: Show b => Int -> IO (Either b a) -> (b -> IO (Either b a)) -> IO a
 retry 0 _ _ = fail "No retries specified"

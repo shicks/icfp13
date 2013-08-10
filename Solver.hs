@@ -9,12 +9,17 @@ import Program
 
 import Control.Monad ( forM, forM_ )
 import Data.Bits ( Bits, (.&.), shiftL, shiftR, shift, xor )
-import Data.List ( (\\), delete, replicate, sortBy, union )
+import Data.List ( (\\), delete, groupBy, intercalate, 
+                   nub, replicate, sort, sortBy, union )
+import Data.Function ( on )
 import Data.Maybe ( fromJust )
+import Data.Monoid ( Monoid(..) )
 import Data.Ord ( comparing )
 import Data.Word ( Word64 )
 import System.Random ( Random(..), RandomGen(..) )
+import System.IO.Unsafe ( unsafeInterleaveIO )
 import Text.ParserCombinators.Parsec ( parse )
+import Text.Printf ( printf )
 
 generate :: Int -> [String] -> [Program]
 generate s o = do e <- generate' ["x"] (s-1) ops ops
@@ -72,26 +77,46 @@ pickInputs n = forM [1..n] $ \x -> toWord `fmap` randomRIO (0, (1 `shiftL` 64) -
 smallInputs :: Int -> [Word64]
 smallInputs n = [0..fromIntegral n]
 
-checkOutputs :: [Word64] -> [Word64] -> Program -> Bool
+checkOutputs :: IsProgram p => [Word64] -> [Word64] -> p -> Bool
 checkOutputs [] [] _ = True
 checkOutputs (i:is) (o:os) p | evaluate p i == o = checkOutputs is os p
                              | otherwise = False
+
+-- countingFilter :: Int -> (a -> Bool) -> [a] -> IO [a]
+-- countingFilter incr p list = unsafeInterleaveIO $ cf' 0 0 list
+--   where cf' acc rej [] = do putStrLn $ msg " finished" acc rej
+--                             return []
+--         cf' acc rej (a:as) | p a = do if (acc + 1) `mod` incr == 0
+--                                          then putStrLn $ msg "" (acc+1) rej
+--                                          else return ()
+--                                       (a:) `fmap` cf' (acc+1) rej as
+--                            | otherwise = do if (rej + 1) `mod` incr == 0
+--                                                then putStrLn $ msg "" acc (rej+1)
+--                                                else return ()
+--                                             cf' acc (rej+1) as
+--         msg m a r = "Filter" ++ m ++ ": accepted " ++ show a ++ 
+--                     " and rejected " ++ show r ++ " elements."
 
 solve :: Int -> String -> IO () -- (TrainingProblem, [Word64], [Word64], GuessResponse)
 solve n os = do t <- train (Just n) os
                 putStrLn $ "Problem id: " ++ trainingId t
                 putStrLn $ "Problem size: " ++ show (trainingSize t)
                 putStrLn $ "Problem operators: " ++ show (trainingOperators t)
-                retry 3 (attempt t []) (attempt t)
-  where attempt t ss = do is <- (\x -> ss ++ smallInputs 64 ++ x) `fmap` pickInputs 136
+                retry 3 (attempt t ([], [])) (attempt t)
+  where attempt t ss = do let (is0, os0) = ss
+                          is <- if null is0 
+                                then (smallInputs 64 ++) `fmap` pickInputs 190
+                                else pickInputs 250
                           os <- evalProblem (trainingId t) is
                           let ps = generate (trainingSize t) (trainingOperators t)
                           -- putStrLn $ "Possible programs: " ++ show (length ps)
+                          -- putStrLn "Filtering"
                           let ps' = filter (checkOutputs is os) ps
                           -- putStrLn $ "Filtered programs: " ++ show (length ps')
                           iterate ps' (is0++is) (os0++os)
                             where iterate x is os = do
-                                    (sol:rest) <- return x 
+                                    -- putStrLn "Iterate"
+                                    (sol:rest) <- return x
                                     response <- guess (trainingId t) sol
                                     -- response <- case x of
                                     --   [] -> fail "Empty"
@@ -171,7 +196,7 @@ findOnes = findOnes' 0
 proximity :: Word64 -> Word64 -> Int
 proximity a b = 64 - length (findOnes $ a `xor` b `xor` 1)
 
-tryP :: [Word64] -> [Word64] -> Program -> Int
+tryP :: IsProgram p => [Word64] -> [Word64] -> p -> Int
 tryP is os p = sum $ map (\(i, o) -> proximity (evaluate p i) o) $ zip is os
 
 maybeNot :: [Expression -> Expression]
@@ -200,20 +225,126 @@ difference = d' 0
         d' n i o | i .&. 1 /= o .&. 1 = n : d' (n+1) (i.>>.1) (o.>>.1)
                  | otherwise = d' (n+1) (i.>>.1) (o.>>.1)
 
-checkBit :: Program -> Int -> Word64 -> Bool
+differenceC :: Word64 -> Word64 -> Word64 -> [(Int, Effect)]
+differenceC = d' 0
+  where d' n _ 0 0 = []
+        d' n i' i o | i .&. 1 /= o .&. 1 = (n, if i'.&.1 == o.&.1 then Opposite else Same) 
+                                           : d' (n+1) (i'.>>.1) (i.>>.1) (o.>>.1)
+                    | otherwise = d' (n+1) (i'.>>.1) (i.>>.1) (o.>>.1)
+
+checkBit :: IsProgram p => p -> Int -> Word64 -> Bool
 checkBit p b x = checkBit' p (evaluate p x) b x
 
 -- | partially applied for efficiency so we don't keep checking 0
-checkBit' :: Program -> Word64 -> Int -> Word64 -> Bool
+checkBit' :: IsProgram p => p -> Word64 -> Int -> Word64 -> Bool
 checkBit' p x0 b x = evaluate p (flipBit b x) /= x0
 
-checkBits :: Program -> Word64 -> [(Int, [Int])]
-checkBits p x = let y0 = evaluate p x
+data Effect = NoEffect | Same | Opposite | Both
+            deriving ( Eq, Enum, Ord )
+
+instance Show Effect where
+  show NoEffect = ""
+  show Same = "+"
+  show Opposite = "-"
+  show Both = "?"
+
+instance Monoid Effect where
+  mempty = NoEffect
+  mappend NoEffect x = x
+  mappend x NoEffect = x
+  mappend x y | x == y = x
+              | otherwise = Both
+
+newtype Correlation = Correlation [(Int, [(Int, Effect)])]
+
+instance Monoid Correlation where
+  mempty = Correlation []
+  mappend (Correlation a) (Correlation b) = Correlation $ app a b
+    where app [] b = b
+          app a [] = a
+          app (a:as) (b:bs) | fst a == fst b = (fst a, merge (snd a) (snd b)):app as bs
+                            | fst a < fst b = a:app as (b:bs)
+                            | otherwise = b:app (a:as) bs
+          merge [] b = b
+          merge a [] = a
+          merge (a:as) (b:bs) | fst a == fst b = (fst a, mappend (snd a) (snd b)):merge as bs
+                              | fst a < fst b = a:merge as (b:bs)
+                              | otherwise = b:merge (a:as) bs
+
+instance Show Correlation where
+  show (Correlation rows) = intercalate "\n" $ map s rows
+    where s (b, (corr)) = printf "%2d    " b ++ s' Nothing corr
+          s' Nothing ((i,b):(i',b'):ss) | i'==i+1 && b==b'
+                                         = s' (Just i) ((i',b'):ss)
+                                        | otherwise
+                                         = s'' (i,b) ++ " " ++ s' Nothing ((i',b'):ss)
+          s' Nothing (x:[]) = s'' x
+          s' Nothing [] = []
+          s' (Just i'') ((i,b):(i',b'):ss) | i'==i+1 && b==b'
+                                            = s' (Just i'') ((i',b'):ss)
+                                           | otherwise
+                                            = s'' (i'',b) ++ ".." ++ show i ++ " " ++ 
+                                              s' Nothing ((i',b'):ss)
+          s' (Just i') ((i,b):[]) = s'' (i',b) ++ ".." ++ show i
+          s'' (i, NoEffect) = ""
+          s'' (i, eff) = show eff ++ show i
+
+checkBitsC :: IsProgram p => p -> Word64 -> Correlation
+checkBitsC p x = Correlation $
+                let y0 = evaluate p x
                 in do b <- [0..63]
-                      let y1 = evaluate p (flipBit b x)
-                      case difference y0 y1 of
+                      let x1 = flipBit b x
+                          y1 = evaluate p x1
+                      case differenceC x1 y0 y1 of
                         [] -> fail ""
                         bs -> return (b, bs)
+
+
+-- (output bit = left edge, input bit = top edge)
+newtype Table = Table [((Int, Int), [(Word64, Bool)])]
+
+instance Monoid Table where
+  mempty = Table []
+  mappend (Table a) (Table b) = Table $ app a b
+    where app [] b = b
+          app a [] = a
+          app (a:as) (b:bs) | fst a == fst b = (fst a, snd a ++ snd b):app as bs
+                            | fst a < fst b = a:app as (b:bs)
+                            | otherwise = b:app (a:as) bs
+
+instance Show Table where
+ show (Table xs) = intercalate "\n" $ header : map showRow rows
+    where rows = groupBy ((==) `on` (fst . fst)) xs
+          cols :: [Int]
+          cols = nub $ sort $ map (snd . fst) xs
+          header :: String
+          header = "   " ++ concat (map (printf "%3d") cols)
+          showRow :: [((Int, Int), [(Word64, Bool)])] -> String
+          showRow r = printf "%2d  " (fst $ fst $ head r) ++ terms cols r
+          terms :: [Int] -> [((Int, Int), [(a, Bool)])] -> String
+          terms [] _ = ""
+          terms (c:cs) t@(((_, c'), d):ds) | c == c' = showCell d ++ terms cs ds
+                                           | otherwise = "   " ++ terms cs t
+          terms (c:cs) [] = ""
+          showCell ds = if all snd ds 
+                        then " + " else if any (not . snd) ds
+                                        then " ~ " else " ? "
+
+differenceT :: Word64 -> Word64 -> Word64 -> [(Int, Bool)]
+differenceT ii' = d' 0 ii'
+  where d' n _ 0 0 = []
+        d' n i' i o | i .&. 1 /= o .&. 1 = (n, i'.&.1 == o.&.1)
+                                           : d' (n+1) (i'.>>.1) (i.>>.1) (o.>>.1)
+                    | otherwise = d' (n+1) (i'.>>.1) (i.>>.1) (o.>>.1)
+
+checkBits :: IsProgram p => p -> Word64 -> Table
+checkBits p x = Table $ sortBy (comparing fst) $
+                let y0 = evaluate p x
+                in do b <- [0..63]
+                      let x1 = flipBit b x
+                          y1 = evaluate p x1
+                      (c, r) <- differenceT x1 y0 y1
+                      return ((c, b), [(x, r)])
 
 -- explore :: [Word64] -> [Word64] -> IO ()
 -- explore is os = do forM_ [1..64] $ \n -> do

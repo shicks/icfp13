@@ -13,6 +13,9 @@ import Text.ParserCombinators.Parsec ( Parser, (<|>), oneOf,
                                        string, try, getPosition,
                                        sourceColumn )
 
+class IsProgram p where
+  evaluate :: p -> Word64 -> Word64
+
 data Program = P { param :: String, unP ::  Expression }
              deriving ( Eq, Ord )
 data Expression = Zero | One | Id String
@@ -29,6 +32,29 @@ data Op2 = And | Or | Xor | Plus
 
 data Op = Cond | CFold | TFold | Unary Op1 | Binary Op2
         deriving ( Eq, Ord )
+
+_0, _1, _x, _y :: Program
+_0 = P "x" Zero
+_1 = P "x" One
+_x = P "x" (Id "x")
+_y = P "y" (Id "y")
+_not, _shr1, _shr4, _shr16, _shl1 :: Program -> Program
+_not (P _ x) = P "x" $ Op1 Not x
+_shr1 (P _ x) = P "x" $ Op1 Shr1 x
+_shr4 (P _ x) = P "x" $ Op1 Shr4 x
+_shr16 (P _ x) = P "x" $ Op1 Shr16 x
+_shl1 (P _ x) = P "x" $ Op1 Shl1 x
+_and, _or, _xor, _plus :: Program -> Program -> Program
+_and (P _ x) (P _ y) = P "x" $ Op2 And x y
+_or (P _ x) (P _ y) = P "x" $ Op2 Or x y
+_xor (P _ x) (P _ y) = P "x" $ Op2 Xor x y
+_plus (P _ x) (P _ y) = P "x" $ Op2 Plus x y
+_if0 :: Program -> Program -> Program -> Program
+_if0 (P _ c) (P _ t) (P _ f) = P "x" $ If0 c t f
+_fold :: Program -> Program -> Program -> Program
+_fold (P _ x) (P _ y) (P _ z) = P "x" $ Fold x y "x" "y" z
+_tfold :: Program -> Program
+_tfold z = _fold _x _0 z
 
 instance Show Program where
   show (P s e) = "(lambda (" ++ s ++ ") " ++ show e ++ ")"
@@ -70,20 +96,20 @@ bytes :: Word64 -> [Word64]
 bytes = take 8 . drop 1 . map fst . iterate next . (0,)
   where next (a, b) = (b .&. 0xff, b `shiftR` 8)
 
-evaluate :: Program -> Word64 -> Word64
-evaluate (P s e) x = evaluate' [(s, x)] e
-  where evaluate' _ Zero = 0
-        evaluate' _ One = 1
-        evaluate' v (Id s') = fromJust $ lookup s' v
-        evaluate' v (If0 c t f) = if evaluate' v c == 0 
-                                  then evaluate' v t 
-                                  else evaluate' v f
-        evaluate' v (Fold arg start sy sz accum) = foldr f (evaluate' v start) $ 
-                                                   reverse $ bytes $ evaluate' v arg
-          where f y z = evaluate' ((sy, y):(sz, z):v) accum
-        evaluate' v (Op1 op e) = op1 op $ evaluate' v e
-        evaluate' v (Op2 op y z) = op2 op (evaluate' v y) (evaluate' v z)
-        evaluate' v (Shift n e) = shift (evaluate' v e) n
+instance IsProgram Program where
+  evaluate (P s e) x = evaluate' [(s, x)] e
+    where evaluate' _ Zero = 0
+          evaluate' _ One = 1
+          evaluate' v (Id s') = fromJust $ lookup s' v
+          evaluate' v (If0 c t f) = if evaluate' v c == 0 
+                                    then evaluate' v t 
+                                    else evaluate' v f
+          evaluate' v (Fold arg start sy sz accum) = foldr f (evaluate' v start) $ 
+                                                     reverse $ bytes $ evaluate' v arg
+            where f y z = evaluate' ((sy, y):(sz, z):v) accum
+          evaluate' v (Op1 op e) = op1 op $ evaluate' v e
+          evaluate' v (Op2 op y z) = op2 op (evaluate' v y) (evaluate' v z)
+          evaluate' v (Shift n e) = shift (evaluate' v e) n
 
 op1 :: Op1 -> Word64 -> Word64
 op1 Not = complement
