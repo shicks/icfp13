@@ -818,6 +818,7 @@ solveBonusReal t =
                 -- putStrLn $ show $ canonicalize $ solution t
                 putStrLn $ "Conditional bits: " ++ show condBits
                 case condBits of
+                  [] -> solveMulti t
                   [b] -> do
                     let pC = _and _1 $ canonicalize $ P "x" $ Shift (-b) $ Id "x" -- solve isC osC
                         is0 = map (.&. (complement $ mask [b])) $ take 127 standardInputs
@@ -904,6 +905,7 @@ solveBonusReal t =
                               --   r' -> do putStrLn $ show r'
                               
                     -- TODO - if it's rejected, gather more data for the rejectd branch
+                  _ -> fail "can't handle this case"
   where checkBits' :: Int -> Word64 -> [Word64] -> Table
         checkBits' i x0 ys = Table (sortBy (comparing fst) $
                   let y0 = head ys
