@@ -38,6 +38,7 @@ import System.Directory ( createDirectoryIfMissing, getDirectoryContents )
 import System.Random ( Random(..), RandomGen(..) )
 import System.IO.Error ( catchIOError, ioError )
 import System.IO.Unsafe ( unsafeInterleaveIO, unsafePerformIO )
+import System.Timeout ( timeout )
 import Text.ParserCombinators.Parsec ( parse, eof )
 import Text.Printf ( printf )
 
@@ -414,8 +415,13 @@ solveCache eval guess p =
               [] -> fail $ "ran out of options"
 
 solveMulti :: Problem -> IO ()
-solveMulti p = solveCacheReal p `catchIOError` \_ -> do putStrLn "Failing over"
-                                                        solve2real p
+solveMulti p = do result <- timeout 35000000 $
+                            solveCacheReal p `catchIOError` 
+                            \_ -> do putStrLn "Failing over"
+                                     solve2real p
+                  case result of
+                    Just () -> return ()
+                    Nothing -> putStrLn "Timed out"
 
 unsolved :: Problem -> Bool
 unsolved p = problemSolved p /= Just True && problemTime p /= Just 0
@@ -425,7 +431,7 @@ solveId i = do ps <- filter (\p -> unsolved p && take (length i) (problemId p) =
                solveMulti $ head ps
 
 solveNext :: Int -> IO ()
-solveNext n = do unsolved <- (sortBy (comparing problemSize) . filter (\p -> problemTime p == Nothing)) 
+solveNext n = do unsolved <- (sortBy (comparing problemSize) . filter (\p -> unsolved p && not ("bonus" `elem` problemOperators p)))
                              `fmap` reloadProblems
                  forM_ (take n unsolved) solveMulti
 
@@ -466,8 +472,10 @@ solveCacheTrain n os = do t <- train n os
                                        ioError e
                           
 solveCacheReal :: Problem -> IO ()
-solveCacheReal p = do solveCache (\p is -> evalProblem (problemId p) is) 
-                        (guess . problemId) p
+solveCacheReal p = do Just () <- timeout 20000000
+                         (do solveCache (\p is -> evalProblem (problemId p) is) 
+                              (guess . problemId) p)
+                      return ()
 
 -- is <- if null is0
                  --                then (smallInputs 64 ++) `fmap` pickInputs 190
