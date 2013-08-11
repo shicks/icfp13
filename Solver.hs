@@ -15,11 +15,11 @@ import Data.ByteString.Lazy ( ByteString )
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Base16 as B16
-import Data.List ( (\\), delete, groupBy, intercalate, 
+import Data.List ( (\\), delete, elemIndex, groupBy, intercalate, 
                    nub, replicate, sort, sortBy, transpose, union )
 import Data.Function ( on )
 import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
-import Data.Maybe ( fromJust )
+import Data.Maybe ( fromJust, isJust )
 import Data.Monoid ( Monoid(..) )
 import Data.Ord ( comparing )
 import Data.Word ( Word64, Word8 )
@@ -31,16 +31,16 @@ import Text.ParserCombinators.Parsec ( parse, eof )
 import Text.Printf ( printf )
 
 standardInputs :: [Word64]
-standardInputs = 0 : complement 0 : small ++ map (`shiftL`16) small ++ 
+standardInputs = nub $ sort $ 0 : complement 0 : small ++ map (`shiftL`16) small ++ 
                  map (\i -> i .|. i `shiftL`32 .|. i `shiftL`48) small ++
                  map complement small ++ 
                  map (\(x,y) -> x .|. (y `shiftL` 25)) 
                      (zip small $ drop 5 small) ++
                  map (\(x,y) -> x `xor` (y `shiftL` 8)) 
-                     (zip small $ drop 2 small)
+                     (zip small $ drop 2 small) ++ allCacheWords
   where small :: [Word64]
         small = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 14, 15, 16, 17, 20, 
-                 24, 29, 31, 32, 47, 48, 63, 64, 72, 75, 92, 95, 96,
+                 24, 29, 31, 32, 47, 48, 63, 64, 72, 92, 95, 96,
                  127, 128, 192, 255, 256, 511, 512, 1023, 1024, 2047,
                  2048, 32767, 32768, 65535]
 
@@ -322,6 +322,62 @@ solveReal p = do putStrLn $ "Problem: " ++ show p
                                           else return $ Left (a:is, e:os)
                                       r -> fail $ show r
 
+tryAll :: (a -> IO b) -> [a] -> IO b
+tryAll f (a:[]) = f a
+tryAll f (a:as) = catchIOError (f a) $ \e -> tryAll f as
+
+solveCache :: Show a => (a -> [Word64] -> IO [Word64]) -> (a -> Program -> IO GuessResponse) -> a -> IO ()
+solveCache eval guess p = 
+              do putStrLn $ "Problem: " ++ show p
+                 os <- eval p standardInputs
+                 probs <- loadCachesFromIO standardInputs os
+                 let sorted = sortBy (comparing length) probs
+                 tryAll (doGuess . filter (checkOutputs standardInputs os)) sorted
+                   where doGuess :: [Program] -> IO ()
+                         doGuess x = do
+                           -- TODO - once we run out, try other options
+                           case x of
+                             (sol:rest) -> do
+                               response <- guess p sol
+                               case response of
+                                 Win -> print $ "Solved: " ++ show sol
+                                 m@(Mismatch a e _) -> do
+                                   print m
+                                   doGuess $ filter (checkOutputs [a] [e]) rest
+                                 err -> fail $ show err
+                             [] -> fail $ "ran out of options"
+
+solveCacheTrain :: Maybe Int -> String -> IO ()
+solveCacheTrain n os = do t <- train n os
+                          putStrLn $ "Problem id: " ++ trainingId t
+                          putStrLn $ "Problem size: " ++ show (trainingSize t)
+                          putStrLn $ "Problem operators: " ++ show (trainingOperators t)
+                          solveCache (\p is -> return $ map (evaluate (solution p)) is) 
+                                     (guess . trainingId) t
+
+-- is <- if null is0
+                 --                then (smallInputs 64 ++) `fmap` pickInputs 190
+                 --                else pickInputs 250
+                 --          let ps = generate (problemSize p) (problemOperators p)
+                 --          -- putStrLn $ "Possible programs: " ++ show (length ps)
+                 --          let ps' = filter (checkOutputs is os) ps
+                 --          -- putStrLn $ "Filtered programs: " ++ show (length ps')
+                 --          iterate ps' (is0++is) (os0++os)
+                 --            where iterate x is os = do
+                 --                    (sol:rest) <- return x 
+                 --                    response <- guess (problemId p) sol
+                 --                    -- response <- case x of
+                 --                    --   [] -> fail "Empty"
+                 --                    --   _ -> return ()
+                 --                    case response of
+                 --                      Win -> return $ Right ()
+                 --                      m@(Mismatch a e _) -> do 
+                 --                        print m
+                 --                        let rest' = filter (checkOutputs [a] [e]) rest
+                 --                        if null rest' then iterate rest' (a:is) (e:os)
+                 --                          else return $ Left (a:is, e:os)
+                 --                      r -> fail $ show r
+
 -- How would we solve something by hand?
 -- 1. what sequence of bits are in common?
 -- 2. what pair of sequences can be xor'd/and'd/or'd to be in common?
@@ -525,6 +581,8 @@ allCaches = [Cache 0 [0, 1, 2, 3, 4, 15, 16, 255, 256, complement 0],
              Cache 1 [0x1234567890abcdef, 0x8877665544332211, 0xf1e2d3c4b5a60798],
              Cache 2 [1.<<.10, 1.<<.40, complement $ 1.<<. 20, complement $ 1 .<<. 50]]
 
+allCacheWords = concatMap (\(Cache _ ws) -> ws) allCaches
+
 -- | Writes a program to a cache
 writeProgram :: Int       -- ^ Which cache to write to 
              -> Program   -- ^ Program to write 
@@ -550,6 +608,14 @@ writeToAllCaches :: Program -> IO ()
 writeToAllCaches p = forM_ allCaches $ 
                         \(Cache c is) -> writeProgram c p' $ map (evaluate p') is
   where p' = canonicalize p
+
+-- given input/output pairs that includes the cache's keys
+loadCachesFromIO :: [Word64] -> [Word64] -> IO [[Program]]
+loadCachesFromIO ins outs = mapM (\(Cache c cins) -> load' c cins) allCaches
+  where load' c cins = let couts = map (\i -> (outs !!) `fmap` elemIndex i ins) cins
+                       in if all isJust couts
+                          then loadCache c $ map fromJust couts
+                          else return []
 
 loadCache :: Int -> [Word64] -> IO [Program]
 loadCache c os = let h = BC.unpack $ B16.encode $ hash $ BS.pack $ packForHash os
@@ -584,6 +650,7 @@ loadAll c = let dir = cacheLocation ++ show c
 --  2. Size of binop groups
 --  3. Size and style of conditional/fold groups
 
+
 data CachedProgram = CachedProgram Program [[Word64]] Bool Bool -- results, has fold, const
 
 instance Eq CachedProgram where
@@ -594,6 +661,11 @@ instance Ord CachedProgram where
 
 instance Show CachedProgram where
   show (CachedProgram p _ _ _) = show p
+
+writeCachedProgram :: CachedProgram -> IO ()
+writeCachedProgram (CachedProgram p os _ _) = mapM_ (\(c, o) -> writeProgram c p o) $ 
+                                              zip (map cacheNum allCaches) os
+  where cacheNum (Cache c _) = c
 
 unCachedProgram :: CachedProgram -> Program
 unCachedProgram (CachedProgram p _ _ _) = p
@@ -622,8 +694,11 @@ instance ProgramBuilder CachedProgram where
     where mapFold p3 x1 x2 = map (\(y1,y2) -> 
                                    map (\(z1,z2) -> evalFold p3 z1 z2) (zip y1 y2)) (zip x1 x2)
 
-maxDepth = 9
+maxDepth = 9 -- 9 gets 6 million in 210 sec
 maxArgSize = 3
+
+-- depth 6 fetched in .5 sec but wrote 90M (22k progs) in 30 secs
+--  -> factor of 60 for writing to disk
 
 --smallPrograms = map cacheProgram $ map fst $ concat $ take maxArgSize generateAll
 --smallerPrograms = map cacheProgram $ map fst $ concat $ take 3 generateAll
@@ -705,6 +780,8 @@ depthFirst = df _0 ++ df _1 ++ df _x
                             | size e0 < size e1 || (size e0 == size e1 && e0 < e1) = False -- commutative
                             | otherwise = checkIndivBinary b e0 && checkIndivBinary b e1
         checkIndivBinary Or Zero = False
+        checkIndivBinary Or (Op1 Not Zero) = False
+        checkIndivBinary And Zero = False
         checkIndivBinary And (Op1 Not Zero) = False
         checkIndivBinary Xor Zero = False
         checkIndivBinary Plus Zero = False
