@@ -417,6 +417,10 @@ solveMulti :: Problem -> IO ()
 solveMulti p = solveCacheReal p `catchIOError` \_ -> do putStrLn "Failing over"
                                                         solve2real p
 
+solveId :: String -> IO ()
+solveId i = do p <- filter (\p -> take (length i) (problemId p) == i) `fmap` myProblems
+               solveMulti p
+
 solveNext :: Int -> IO ()
 solveNext n = do unsolved <- (sortBy (comparing problemSize) . filter (\p -> problemTime p == Nothing)) 
                              `fmap` reloadProblems
