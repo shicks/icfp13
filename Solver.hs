@@ -1,3 +1,5 @@
+{-# LANGUAGE TupleSections #-}
+
 -- | Attempt to actually solve the problems.
 
 module Solver where
@@ -19,7 +21,8 @@ import Data.List ( (\\), delete, elemIndex, groupBy, intercalate,
                    nub, replicate, sort, sortBy, transpose, union )
 import Data.Function ( on )
 import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
-import Data.Maybe ( fromJust, isJust )
+import Data.Maybe ( catMaybes, fromJust, isJust, listToMaybe )
+import qualified Data.MemoCombinators as Memo
 import Data.Monoid ( Monoid(..) )
 import Data.Ord ( comparing )
 import Data.Word ( Word64, Word8 )
@@ -330,30 +333,55 @@ solveCache :: Show a => (a -> [Word64] -> IO [Word64]) -> (a -> Program -> IO Gu
 solveCache eval guess p = 
               do putStrLn $ "Problem: " ++ show p
                  os <- eval p standardInputs
-                 probs <- loadCachesFromIO standardInputs os
-                 let sorted = sortBy (comparing length) probs
-                 tryAll (doGuess . filter (checkOutputs standardInputs os)) sorted
-                   where doGuess :: [Program] -> IO ()
-                         doGuess x = do
-                           -- TODO - once we run out, try other options
-                           case x of
-                             (sol:rest) -> do
-                               response <- guess p sol
-                               case response of
-                                 Win -> print $ "Solved: " ++ show sol
-                                 m@(Mismatch a e _) -> do
-                                   print m
-                                   doGuess $ filter (checkOutputs [a] [e]) rest
-                                 err -> fail $ show err
-                             [] -> fail $ "ran out of options"
+                 catchIOError (cacheLookups os id) $ \e -> do  -- okay, next guess...?
+                   putStrLn "Attempting to recover by adding some reversible operations."
+                   tryAll (\(f, t) -> cacheLookups (map (uncurry f) $ zip standardInputs os) t) 
+                     reversible
+    where cacheLookups :: [Word64] -> (Program -> Program) -> IO ()
+          cacheLookups os transf = do 
+            probs <- loadCachesFromIO standardInputs os
+            let sorted = sortBy (comparing length) probs
+            tryAll (doGuess transf . filter (checkOutputs standardInputs os)) sorted
+          doGuess :: (Program -> Program) -> [Program] -> IO ()
+          doGuess transf x = do
+            -- TODO - once we run out, try other options
+            case x of
+              (sol:rest) -> do
+                response <- guess p (transf sol)
+                case response of
+                  Win -> putStrLn $ "Solved: " ++ show (transf sol)
+                  m@(Mismatch a e _) -> do
+                    print m
+                    doGuess transf $ filter (checkOutputs [a] [e]) rest
+                  err -> fail $ show err
+              [] -> fail $ "ran out of options"
+
+reversible :: [(Word64 -> Word64 -> Word64, Program -> Program)]
+reversible = map reverseXor sp ++ map reversePlus sp
+  where sp = -- map unCachedProgram smallPrograms
+             map fst $ concat $ take 4 generateAll
+
+reverseXor :: Program -> (Word64 -> Word64 -> Word64, Program -> Program)
+reverseXor p = (fix, amend)
+  where fix x out = evaluate p x `xor` out
+        amend p' = _xor p' p
+
+reversePlus :: Program -> (Word64 -> Word64 -> Word64, Program -> Program)
+reversePlus p = (fix, amend)
+  where fix x out = evaluate p x - out
+        amend p' = _plus p' p
 
 solveCacheTrain :: Maybe Int -> String -> IO ()
 solveCacheTrain n os = do t <- train n os
                           putStrLn $ "Problem id: " ++ trainingId t
                           putStrLn $ "Problem size: " ++ show (trainingSize t)
                           putStrLn $ "Problem operators: " ++ show (trainingOperators t)
-                          solveCache (\p is -> return $ map (evaluate (solution p)) is) 
-                                     (guess . trainingId) t
+                          catchIOError (
+                            solveCache (\p is -> return $ map (evaluate (solution p)) is) 
+                                       (guess . trainingId) t)
+                            $ \e -> do writeToAllCaches $ solution t
+                                       ioError e
+                          
 
 -- is <- if null is0
                  --                then (smallInputs 64 ++) `fmap` pickInputs 190
@@ -581,6 +609,16 @@ allCaches = [Cache 0 [0, 1, 2, 3, 4, 15, 16, 255, 256, complement 0],
              Cache 1 [0x1234567890abcdef, 0x8877665544332211, 0xf1e2d3c4b5a60798],
              Cache 2 [1.<<.10, 1.<<.40, complement $ 1.<<. 20, complement $ 1 .<<. 50]]
 
+-- extraCaches = allCaches ++ [Cache 3 [0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef,
+--                                      0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+--                                      0xf1, 0xe2, 0xd3, 0xc4, 0xb5, 0xa6, 0x07, 0x98,
+--                                      255 - 16, 255 - 4]]
+
+cacheValueLookup :: Word64 -> Maybe (Int, Int)
+cacheValueLookup = Memo.integral cvl
+  where cvl w = listToMaybe $ catMaybes $
+                map (\(i, (Cache _ ws)) -> (i,) `fmap` elemIndex w ws) (zip [0..] allCaches)
+
 allCacheWords = concatMap (\(Cache _ ws) -> ws) allCaches
 
 -- | Writes a program to a cache
@@ -650,52 +688,69 @@ loadAll c = let dir = cacheLocation ++ show c
 --  2. Size of binop groups
 --  3. Size and style of conditional/fold groups
 
+type EvalF = (Word64, Word64) -> Word64
 
-data CachedProgram = CachedProgram Program [[Word64]] Bool Bool -- results, has fold, const
+evalF :: Program -> EvalF
+evalF p | size p > 3 = Memo.pair Memo.integral Memo.integral $
+                       \(x, y) -> evaluateNamed [("x", x), ("y", y)] p
+        | otherwise = \(x, y) -> evaluateNamed [("x", x), ("y", y)] p
+
+data CachedProgram = CachedProgram Program [[Word64]] Bool Bool EvalF -- results, has fold, const
+cachedProgram p ws f c = CachedProgram p ws f c (evalF p)
 
 instance Eq CachedProgram where
-  (==) (CachedProgram p _ _ _) (CachedProgram p' _ _ _) = p == p'
+  (==) (CachedProgram p _ _ _ _) (CachedProgram p' _ _ _ _) = p == p'
 
 instance Ord CachedProgram where
-  compare (CachedProgram p _ _ _) (CachedProgram p' _ _ _) = compare p p'
+  compare (CachedProgram p _ _ _ _) (CachedProgram p' _ _ _ _) = compare p p'
 
 instance Show CachedProgram where
-  show (CachedProgram p _ _ _) = show p
+  show (CachedProgram p _ _ _ _) = show p
 
 writeCachedProgram :: CachedProgram -> IO ()
-writeCachedProgram (CachedProgram p os _ _) = mapM_ (\(c, o) -> writeProgram c p o) $ 
-                                              zip (map cacheNum allCaches) os
+writeCachedProgram (CachedProgram p os _ _ _) = mapM_ (\(c, o) -> writeProgram c p o) $ 
+                                                zip (map cacheNum allCaches) os
   where cacheNum (Cache c _) = c
 
 unCachedProgram :: CachedProgram -> Program
-unCachedProgram (CachedProgram p _ _ _) = p
+unCachedProgram (CachedProgram p _ _ _ _) = p
 
 -- only needs to work for small programs - no folds
 cacheProgram :: Program -> CachedProgram
-cacheProgram p = CachedProgram p os False (all (== head (concat os)) $ concat os)
+cacheProgram p = cachedProgram p os False (all (== head (concat os)) $ concat os)
   where os = map (\(Cache c is) -> map (evaluate p) is) allCaches
 
+instance IsProgram CachedProgram where
+  evaluate (CachedProgram p ws _ _ _) w = case cacheValueLookup w of
+                                            Just (i, j) -> ws !! i !! j
+                                            Nothing -> evaluate p w
+  evaluateNamed ((_, w):[]) (CachedProgram _ _ _ _ evalf) = evalf (w, 0)
+  evaluateNamed (("x", x):("y", y):_) (CachedProgram _ _ _ _ evalf) = evalf (x, y)
+  evaluateNamed v (CachedProgram p _ _ _ _) = evaluateNamed v p
+
 instance ProgramBuilder CachedProgram where
-  build0 = CachedProgram _0 (map (\(Cache _ is) -> map (const 0) is) allCaches) False True
-  build1 = CachedProgram _1 (map (\(Cache _ is) -> map (const 1) is) allCaches) False True
-  buildVar v = CachedProgram (buildVar v) (map (\(Cache _ is) -> map id is) allCaches) False True
-  buildUnary op (CachedProgram p os f c) = 
-    CachedProgram (buildUnary op p) ((map . map) (op1 op) os) f c
-  buildBinary op (CachedProgram p1 os1 f1 c1) (CachedProgram p2 os2 f2 c2) =
-    CachedProgram (buildBinary op p1 p2) (mapBinary op os1 os2) (f1 || f2) (c1 && c2)
+  build0 = cachedProgram _0 (map (\(Cache _ is) -> map (const 0) is) allCaches) False True
+  build1 = cachedProgram _1 (map (\(Cache _ is) -> map (const 1) is) allCaches) False True
+  buildVar v = cachedProgram (buildVar v) (map (\(Cache _ is) -> map id is) allCaches) False True
+  buildUnary op (CachedProgram p os f c _) = 
+    cachedProgram (buildUnary op p) ((map . map) (op1 op) os) f c
+  buildBinary op (CachedProgram p1 os1 f1 c1 _) (CachedProgram p2 os2 f2 c2 _) =
+    cachedProgram (buildBinary op p1 p2) (mapBinary op os1 os2) (f1 || f2) (c1 && c2)
     where mapBinary op x1 x2 = map (\(y1,y2) -> map (\(z1,z2) -> op2 op z1 z2) (zip y1 y2)) (zip x1 x2)
-  buildCond (CachedProgram p1 os1 f1 c1) (CachedProgram p2 os2 f2 c2) (CachedProgram p3 os3 f3 c3) =
-    CachedProgram (buildCond p1 p2 p3) (mapCond os1 os2 os3) (f1 || f2 || f3) (c1 && c2 && c3)
+  buildCond (CachedProgram p1 os1 f1 c1 _) (CachedProgram p2 os2 f2 c2 _) (CachedProgram p3 os3 f3 c3 _) =
+    cachedProgram (buildCond p1 p2 p3) (mapCond os1 os2 os3) (f1 || f2 || f3) (c1 && c2 && c3)
     where mapCond x1 x2 x3 = map (\(y1,y2,y3) -> 
                                    map (\(c,t,f) -> 
                                          if c == 0 then t else f) (zip3 y1 y2 y3)) (zip3 x1 x2 x3)
-  buildFold (CachedProgram p1 os1 _ c1) (CachedProgram p2 os2 _ c2) (CachedProgram p3 os3 _ _) =
-    CachedProgram (buildFold p1 p2 p3) (mapFold p3 os1 os2) True (c1 && c2)
+  buildFold (CachedProgram p1 os1 _ c1 _) (CachedProgram p2 os2 _ c2 _) (CachedProgram p3 os3 _ _ ef) =
+    cachedProgram (buildFold p1 p2 p3) (mapFold p3 os1 os2) True (c1 && c2)
     where mapFold p3 x1 x2 = map (\(y1,y2) -> 
-                                   map (\(z1,z2) -> evalFold p3 z1 z2) (zip y1 y2)) (zip x1 x2)
+                                   map (\(z1,z2) -> evFold z1 z2) (zip y1 y2)) (zip x1 x2)
+          evFold x y = foldr (\xv yv -> ef (xv, yv)) y $ reverse $ bytes x
 
-maxDepth = 9 -- 9 gets 6 million in 210 sec
-maxArgSize = 3
+
+-- maxDepth = 9 -- 9 gets 6 million in 210 sec
+-- maxArgSize = 3
 
 -- depth 6 fetched in .5 sec but wrote 90M (22k progs) in 30 secs
 --  -> factor of 60 for writing to disk
@@ -714,7 +769,7 @@ smallerPrograms = map cacheProgram [_0, _1, _x]
 -- dfTerms = [DFZero, DFOne, DFVar, 
 --            DFUnary Not, DFUnary Shl1, DFUnary Shr1, DFUnary Shr4, DFUnary Shr16,
 --            DFBinary And, DFBinary Or, DFBinary Xor, DFBinary Plus, 
---            DFCond 0, DFCond 1, DFFold 0, DFFold 1]
+                  --            DFCond 0, DFCond 1, DFFold 0, DFFold 1]
 
 -- dfDecompose :: Maybe Program -> [DFTerm]
 -- dfDecompose Nothing = []
@@ -729,17 +784,17 @@ smallerPrograms = map cacheProgram [_0, _1, _x]
 -- no token - just don't crash...
 
 -- Produce a list of programs
-depthFirst :: [CachedProgram]
-depthFirst = df _0 ++ df _1 ++ df _x
+depthFirst :: Int -> [CachedProgram]
+depthFirst maxDepth = df _0 ++ df _1 ++ df _x
   where df :: CachedProgram -> [CachedProgram]
         df p | size (unCachedProgram p) >= maxDepth = [p]
              | otherwise = concatMap (addUnary p) [Not, Shl1, Shr1, Shr4, Shr16] ++
                            concatMap (addBinary p) [And, Or, Xor, Plus] ++
                            addCond p ++ addFold p
-        addUnary p@(CachedProgram (P _ e) _ _ _) op = 
+        addUnary p@(CachedProgram (P _ e) _ _ _ _) op = 
              if checkUnary op e then df (buildUnary op p) else []
-        addBinary p@(CachedProgram (P _ e) _ _ _) op = 
-             concatMap (\p'@(CachedProgram (P _ e') _ _ _) -> 
+        addBinary p@(CachedProgram (P _ e) _ _ _ _) op = 
+             concatMap (\p'@(CachedProgram (P _ e') _ _ _ _) -> 
                          if checkBinary op e e' 
                          then df (buildBinary op p p')
                          else []) $ smallPrograms
@@ -752,8 +807,8 @@ depthFirst = df _0 ++ df _1 ++ df _x
                    [if checkCond p1 p2 p then [(p1, p2, p)] 
                     else [] | p1 <- smallerPrograms, p2 <- smallerPrograms]]
              in concatMap (\(c, t, f) -> df $ _if0 c t f) args
-        addFold p@(CachedProgram _ _ f _) | f = []
-                                          | otherwise =
+        addFold p@(CachedProgram _ _ f _ _) | f = []
+                                            | otherwise =
              let args = nub $ sort $ concat $ concat [
                    [if checkFold p p1 p2 then [(p, p1, p2)]
                     else [] | p1 <- smallerPrograms, p2 <- concatMap shuffleVars smallerPrograms],
@@ -786,13 +841,13 @@ depthFirst = df _0 ++ df _1 ++ df _x
         checkIndivBinary Xor Zero = False
         checkIndivBinary Plus Zero = False
         checkIndivBinary _ _ = True
-        checkCond (CachedProgram _ _ _ True) _ _ = False
+        checkCond (CachedProgram _ _ _ True _) _ _ = False
         checkCond _ t f | t == f = False
         checkCond _ _ _ = True
         checkFold _ _ _ = True
         shuffleVars :: CachedProgram -> [CachedProgram]
-        shuffleVars (CachedProgram (P v e) _ _ _) = map (\e' -> CachedProgram (P v e') [] False False)
-                                                    (sv e)
+        shuffleVars (CachedProgram (P v e) _ _ _ _) = map (\e' -> cachedProgram (P v e') [] False False)
+                                                      (sv e)
           where sv Zero = [Zero]
                 sv One = [One]
                 sv (Id _) = [Id "x", Id "y"]
