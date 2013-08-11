@@ -287,7 +287,7 @@ solve2real p = do putStrLn $ "Problem: " ++ show p
                   retry 3 (attempt p ()) (attempt p)
   where attempt :: Problem -> () -> IO (Either () ())
         attempt p _ = do os <- evalProblem (problemId p) standardInputs
-                         let ps = concat $ take 11 generateAll
+                         let ps = concat $ take 9 generateAll
                          let ps' = filter (checkOutputs2 os) ps
                          iterate $ map fst ps'
                            where iterate x = do
