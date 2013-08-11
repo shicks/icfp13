@@ -400,7 +400,7 @@ solveNext n = do unsolved <- (sortBy (comparing problemSize) . filter (\p -> pro
 
 emergencySolve :: IO ()
 emergencySolve = do probs <- problemreloadProblems
-                    inProgress = filter (\p -> 
+                    let inProgress = filter (\p -> 
                                           case problemTime p of
                                             Just 0 -> False 
                                             Nothing -> False 
