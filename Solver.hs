@@ -281,6 +281,29 @@ solve2 n os = do t <- train (Just n) os
                                         iterate $ filter (checkOutputs [a] [e]) rest
                                       r -> fail $ show r
 
+solve2real :: Problem -> IO () -- (TrainingProblem, [Word64], [Word64], GuessResponse)
+solve2real p = do putStrLn $ "Problem: " ++ show p
+                  retry 3 (attempt p ()) (attempt p)
+  where attempt :: Problem -> () -> IO (Either () ())
+        attempt p _ = do os <- evalProblem (problemId p) standardInputs
+                         let ps = concat $ take 11 generateAll
+                         let ps' = filter (checkOutputs2 os) ps
+                         iterate $ map fst ps'
+                           where iterate x = do
+                                    -- putStrLn "Iterate"
+                                    (sol:rest) <- return x
+                                    response <- guess (problemId p) sol
+                                    -- response <- case x of
+                                    --   [] -> fail "Empty"
+                                    --   _ -> return ()
+                                    case response of
+                                      Win -> do putStrLn $ "Solution: " ++ show sol
+                                                return $ Right ()
+                                      m@(Mismatch a e _) -> do 
+                                        print m
+                                        iterate $ filter (checkOutputs [a] [e]) rest
+                                      r -> fail $ show r
+
 solve :: Int -> String -> IO () -- (TrainingProblem, [Word64], [Word64], GuessResponse)
 solve n os = do t <- train (Just n) os
                 putStrLn $ "Problem id: " ++ trainingId t
@@ -391,7 +414,8 @@ solveCache eval guess p =
               [] -> fail $ "ran out of options"
 
 solveMulti :: Problem -> IO ()
-solveMulti p = solveCacheReal p `catchIOError` \_ -> solveReal p
+solveMulti p = solveCacheReal p `catchIOError` \_ -> do putStrLn "Failing over"
+                                                        solve2real p
 
 solveNext :: Int -> IO ()
 solveNext n = do unsolved <- (sortBy (comparing problemSize) . filter (\p -> problemTime p == Nothing)) 
@@ -435,8 +459,7 @@ solveCacheTrain n os = do t <- train n os
                                        ioError e
                           
 solveCacheReal :: Problem -> IO ()
-solveCacheReal p = do putStrLn $ "Problem: " ++ show p
-                      solveCache (\p is -> evalProblem (problemId p) is) 
+solveCacheReal p = do solveCache (\p is -> evalProblem (problemId p) is) 
                         (guess . problemId) p
 
 -- is <- if null is0
