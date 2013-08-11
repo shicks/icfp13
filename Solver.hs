@@ -404,7 +404,7 @@ emergencySolve = do probs <- reloadProblems
                                           case problemTime p of
                                             Just 0 -> False 
                                             Nothing -> False 
-                                            _ -> True
+                                            _ -> problemSolved p /= Just True
                                         ) probs
                     forM_ inProgress solveMulti
 
