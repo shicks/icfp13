@@ -415,7 +415,7 @@ solveCache eval guess p =
               [] -> fail $ "ran out of options"
 
 solveMulti :: Problem -> IO ()
-solveMulti p = do result <- timeout 35000000 $
+solveMulti p = do result <- timeout 45000000 $
                             solveCacheReal p `catchIOError` 
                             \_ -> do putStrLn "Failing over"
                                      solve2real p
@@ -470,13 +470,26 @@ solveCacheTrain n os = do t <- train n os
                           putStrLn $ "Problem size: " ++ show (trainingSize t)
                           putStrLn $ "Problem operators: " ++ show (trainingOperators t)
                           catchIOError (
-                            solveCache (\p is -> return $ map (evaluate (solution p)) is) 
+                            -- solveCache (\p is -> return $ map (evaluate (solution p)) is) 
+                            --            (guess . trainingId) t)
+                            solveCache eval'
                                        (guess . trainingId) t)
                             $ \e -> do writeToAllCaches $ solution t
                                        ioError e
+  where eval' p is = do os1 <- evalProblem (trainingId p) is
+                        let os2 = map (evaluate (solution p)) is
+                        if os1 /= os2 then putStrLn "AHH!" else return ()
+                        return os1
                           
+solveCacheGiven :: Program -> IO ()
+solveCacheGiven p = do solveCache (\p is -> return $ map (evaluate p) is) 
+                         (\x y -> if x == y
+                                  then return Win
+                                  else do putStrLn $ "guess " ++ show y 
+                                          return Win) p
+
 solveCacheReal :: Problem -> IO ()
-solveCacheReal p = do Just () <- timeout 20000000
+solveCacheReal p = do Just () <- timeout 25000000
                          (do solveCache (\p is -> evalProblem (problemId p) is) 
                               (guess . problemId) p)
                       return ()
@@ -649,9 +662,10 @@ solveBonus = do t <- train (Just 42) ""
                 is'' <- pickInputs 3
                 let is = is'' ++ map complement is''
                     is' = concatMap (\i -> i : map (\b -> flipBit b i) [0..63]) is
-                os1 <- evalProblem (trainingId t) $ take 240 is'
-                os2 <- evalProblem (trainingId t) $ drop 240 is'
-                let os = os1 ++ os2
+                -- os1 <- evalProblem (trainingId t) $ take 240 is'
+                -- os2 <- evalProblem (trainingId t) $ drop 240 is'
+                let os = map (evaluate $ solution t) is'
+                    --os = os1 ++ os2
                     tab = mconcat $ map (\i -> checkBits' i (is !! i) (take 65 (drop (65 * i) os))) [0..5]
                     condBits = findConditionalBits tab
                 putStrLn $ show tab
@@ -682,6 +696,7 @@ solveBonus = do t <- train (Just 42) ""
                         p0 = solve is0 os0
                         p1 = solve is1 os1
                         p = _if0 (head pC) (head p0) (head p1)
+                    putStrLn $ "Changed: " ++ show changed
                     putStrLn $ "Categories: " ++ show categories
                     putStrLn $ "Condition: " ++ show (take 1 pC)
                     putStrLn $ "0: " ++ show (take 1 p0)
