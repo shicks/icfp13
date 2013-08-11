@@ -5,10 +5,10 @@ module Client where
 import Program
 
 import Control.Concurrent( threadDelay )
-import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
 import Debug.Trace ( trace )
 import Data.Char ( toUpper )
 import Data.Either ( partitionEithers )
+import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
 import Data.List ( intercalate, sortBy )
 import Data.Ord ( comparing )
 import Data.Word ( Word64 )
@@ -120,6 +120,7 @@ instance JSON TrainingProblem where
 
 instance IsProgram TrainingProblem where
   evaluate = evaluate . solution
+  evaluateNamed s = evaluateNamed s . solution
 
 solution :: TrainingProblem -> Program
 solution = read . trainingChallenge 

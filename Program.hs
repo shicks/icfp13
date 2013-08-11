@@ -8,13 +8,14 @@ import Data.List ( nub, sort )
 import Data.Maybe ( fromJust )
 import Data.Word ( Word64 )
 import Text.ParserCombinators.Parsec ( Parser, (<|>), oneOf,
-                                       char, choice, digit, letter,
+                                       char, choice, digit, eof, letter,
                                        many, many1, parse, spaces,
                                        string, try, getPosition,
                                        sourceColumn )
 
 class IsProgram p where
   evaluate :: p -> Word64 -> Word64
+  evaluateNamed :: [(String, Word64)] -> p -> Word64
 
 data Program = P { param :: String, unP ::  Expression }
              deriving ( Eq, Ord )
@@ -34,27 +35,44 @@ data Op2 = And | Or | Xor | Plus
 data Op = Cond | CFold | TFold | Unary Op1 | Binary Op2
         deriving ( Eq, Ord )
 
-_0, _1, _x, _y :: Program
-_0 = P "x" Zero
-_1 = P "x" One
-_x = P "x" (Id "x")
-_y = P "y" (Id "y")
-_not, _shr1, _shr4, _shr16, _shl1 :: Program -> Program
-_not (P _ x) = P "x" $ Op1 Not x
-_shr1 (P _ x) = P "x" $ Op1 Shr1 x
-_shr4 (P _ x) = P "x" $ Op1 Shr4 x
-_shr16 (P _ x) = P "x" $ Op1 Shr16 x
-_shl1 (P _ x) = P "x" $ Op1 Shl1 x
-_and, _or, _xor, _plus :: Program -> Program -> Program
-_and (P _ x) (P _ y) = P "x" $ Op2 And x y
-_or (P _ x) (P _ y) = P "x" $ Op2 Or x y
-_xor (P _ x) (P _ y) = P "x" $ Op2 Xor x y
-_plus (P _ x) (P _ y) = P "x" $ Op2 Plus x y
-_if0 :: Program -> Program -> Program -> Program
-_if0 (P _ c) (P _ t) (P _ f) = P "x" $ If0 c t f
-_fold :: Program -> Program -> Program -> Program
-_fold (P _ x) (P _ y) (P _ z) = P "x" $ Fold x y "x" "y" z
-_tfold :: Program -> Program
+class ProgramBuilder p where
+  build0 :: p
+  build1 :: p
+  buildVar :: String -> p
+  buildUnary :: Op1 -> p -> p
+  buildBinary :: Op2 -> p -> p -> p
+  buildCond :: p -> p -> p -> p
+  buildFold :: p -> p -> p -> p
+
+instance ProgramBuilder Program where
+  build0 = P "x" Zero
+  build1 = P "x" One
+  buildVar s = P "x" $ Id s
+  buildUnary op (P v x) = P v $ Op1 op x
+  buildBinary op (P v x) (P _ y) = P v $ Op2 op x y
+  buildCond (P v c) (P _ t) (P _ f) = P v $ If0 c t f
+  buildFold (P v e0) (P _ e1) (P _ e2) = P v $ Fold e0 e1 "x" "y" e2
+
+_0, _1, _x, _y :: ProgramBuilder p => p
+_0 = build0
+_1 = build1
+_x = buildVar "x"
+_y = buildVar "y"
+_not, _shr1, _shr4, _shr16, _shl1 :: ProgramBuilder p => p -> p
+_not = buildUnary Not
+_shr1 = buildUnary Shr1
+_shr4 = buildUnary Shr4
+_shr16 = buildUnary Shr16
+_shl1 = buildUnary Shl1
+_and, _or, _xor, _plus :: ProgramBuilder p => p -> p -> p
+_and = buildBinary And
+_or = buildBinary Or
+_xor = buildBinary Xor
+_plus = buildBinary Plus
+_if0, _fold :: ProgramBuilder p => p -> p -> p -> p
+_if0 = buildCond
+_fold = buildFold
+_tfold :: ProgramBuilder p => p -> p
 _tfold z = _fold _x _0 z
 
 instance Show Program where
@@ -99,20 +117,30 @@ bytes = take 8 . drop 1 . map fst . iterate next . (0,)
   where next (a, b) = (b .&. 0xff, b `shiftR` 8)
 
 instance IsProgram Program where
-  evaluate (P s e) x = evaluate' [(s, x)] e
-    where evaluate' _ Zero = 0
-          evaluate' _ One = 1
-          evaluate' v (Id s') = fromJust $ lookup s' v
-          evaluate' v (If0 c t f) = if evaluate' v c == 0 
-                                    then evaluate' v t 
-                                    else evaluate' v f
-          evaluate' v (Fold arg start sy sz accum) = foldr f (evaluate' v start) $ 
-                                                     reverse $ bytes $ evaluate' v arg
-            where f y z = evaluate' ((sy, y):(sz, z):v) accum
-          evaluate' v (Op1 op e) = op1 op $ evaluate' v e
-          evaluate' v (Op2 op y z) = op2 op (evaluate' v y) (evaluate' v z)
-          evaluate' v (Shift n e) = shift (evaluate' v e) n
-          evaluate' _ (Const x) = x
+  evaluate (P s e) x = evaluateNamed [(s, x)] e
+  evaluateNamed v (P s e) = evaluateNamed v e
+
+evalFold :: IsProgram p => p -> Word64 -> Word64 -> Word64
+evalFold p x y = foldr (\xv yv -> evaluateNamed [("x", xv), ("y", yv)] p) y $ reverse $ bytes x
+
+instance IsProgram Expression where
+  evaluate e x = evaluateNamed [("x", x)] e
+
+  evaluateNamed _ Zero = 0
+  evaluateNamed _ One = 1
+  evaluateNamed v (Id s') = case lookup s' v of
+    Just x  -> x
+    Nothing -> error $ "Looked for " ++ s' ++ " but only had " ++ show v
+  evaluateNamed v (If0 c t f) = if evaluateNamed v c == 0 
+                                then evaluateNamed v t 
+                                else evaluateNamed v f
+  evaluateNamed v (Fold arg start sy sz accum) = foldr f (evaluateNamed v start) $ 
+                                                 reverse $ bytes $ evaluateNamed v arg
+    where f y z = evaluateNamed ((sy, y):(sz, z):v) accum
+  evaluateNamed v (Op1 op e) = op1 op $ evaluateNamed v e
+  evaluateNamed v (Op2 op y z) = op2 op (evaluateNamed v y) (evaluateNamed v z)
+  evaluateNamed v (Shift n e) = shift (evaluateNamed v e) n
+  evaluateNamed _ (Const x) = x
 
 op1 :: Op1 -> Word64 -> Word64
 op1 Not = complement
@@ -271,7 +299,7 @@ canonicalize :: Program -> Program
 canonicalize (P s e) = P "x" $ c' [(s, "x")] e
   where c' _ One = One
         c' _ Zero = Zero
-        c' v (Id x) = Id $ fromJust $ lookup x v
+        c' v (Id x) = Id $ maybe x id $ lookup x v
         c' v (Op1 op e) = Op1 op (c' v e)
         c' v (Op2 op e0 e1) = Op2 op (c' v e0) (c' v e1)
         c' v (If0 c t f) = If0 (c' v c) (c' v t) (c' v f)
@@ -325,6 +353,7 @@ reduce (P s e) = let e' = reduce2 e
         reduce1 (Op2 Xor e (Const 0)) = e
         reduce1 (Op2 Xor e0 e1) | e0 == e1 = Const 0
         reduce1 (Op2 And e (Const (complement -> 0))) = e
+        reduce1 (Op2 Plus e (Const 0)) = e
         reduce1 (Op2 op e0 e1) = Op2 op (reduce2 e0) (reduce2 e1)
         reduce1 (Shift n (Shift m e)) | m * n > 0 = Shift (m + n) e
         reduce1 (Shift n e) = Shift n (reduce2 e)
