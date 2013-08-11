@@ -430,10 +430,11 @@ solveId :: String -> IO ()
 solveId i = do ps <- filter (\p -> unsolved p && take (length i) (problemId p) == i) `fmap` myProblems
                solveMulti $ head ps
 
-solveNext :: Int -> IO ()
-solveNext n = do unsolved <- (sortBy (comparing problemSize) . filter (\p -> unsolved p && not ("bonus" `elem` problemOperators p)))
+solveNext :: Int -> Int -> IO ()
+solveNext skip n = 
+              do unsolved <- (sortBy (comparing problemSize) . filter (\p -> unsolved p && not ("bonus" `elem` problemOperators p)))
                              `fmap` reloadProblems
-                 forM_ (take n unsolved) solveMulti
+                 forM_ (take n $ drop skip unsolved) solveMulti
 
 emergencySolve :: IO ()
 emergencySolve = do probs <- reloadProblems
