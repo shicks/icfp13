@@ -416,8 +416,8 @@ solveCache eval guess p =
 
 solveMulti :: Problem -> IO ()
 solveMulti p = do result <- timeout 45000000 $
-                            solveCacheReal p `catchIOError` 
-                            \_ -> do putStrLn "Failing over"
+                            --solveCacheReal p `catchIOError` 
+                            --\_ -> do putStrLn "Failing over"
                                      solve2real p
                   case result of
                     Just () -> return ()
