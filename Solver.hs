@@ -9,18 +9,26 @@ import Debug.Trace ( trace )
 import Client
 import Program
 
+
+import Control.Monad.ST ( ST(..), runST )
+import Data.Array.IArray ( Array, (!) )
+import Data.Array.ST ( STArray(..), newArray, readArray, writeArray, runSTArray )
+
 import Control.Monad ( forM, forM_ )
 import Crypto.Hash.SHA1 ( hash )
+import Data.Array ( listArray, range, assocs )
 import Data.Bits ( Bits, (.&.), (.|.), complement, 
                    shiftL, shiftR, shift, xor )
 import Data.ByteString.Lazy ( ByteString )
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Base16 as B16
-import Data.List ( (\\), delete, elemIndex, groupBy, intercalate, 
+import Data.List ( (\\), delete, elemIndex, groupBy, intercalate, intersect,
                    nub, replicate, sort, sortBy, transpose, union )
 import Data.Function ( on )
 import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
+import Data.Map ( Map )
+import qualified Data.Map as Map
 import Data.Maybe ( catMaybes, fromJust, isJust, listToMaybe )
 import qualified Data.MemoCombinators as Memo
 import Data.Monoid ( Monoid(..) )
@@ -112,16 +120,41 @@ generateAll' = concat $ transpose [map (gen' 0) [1..], map (gen' 1) [1..]]
     checkUnary Shr1 (Op1 Shr4 _) = False  -- commutative
     checkUnary Shr1 (Op1 Shr16 _) = False
     checkUnary Shr4 (Op1 Shr16 _) = False
+    checkUnary Shl1 Zero = False
+    checkUnary Shr1 Zero = False
+    checkUnary Shr4 Zero = False
+    checkUnary Shr16 Zero = False
+    checkUnary Shr1 One = False
+    checkUnary Shr4 One = False
+    checkUnary Shr16 One = False
     checkUnary _ _ = True
-    checkBinary b (Op2 b' _ _) _ | b == b' = False -- commutative
+        -- checkBinary b (Op2 b' _ _) _ | b == b' = False -- commutative
     checkBinary b (Op1 Not _) (Op1 Not _) | b /= Plus = False -- factors out
-    checkBinary _ e0 e1 | e0 < e1 = False -- commutative
-    checkBinary b e0 e1 = checkIndivBinary b e0 && checkIndivBinary b e1
+    checkBinary b e0 e1 | e0 == e1 = False -- x or x is boring
+                        | size e0 < size e1 || (size e0 == size e1 && e0 < e1) = False -- commutative
+                        | otherwise = checkIndivBinary b e0 && checkIndivBinary b e1
     checkIndivBinary Or Zero = False
+    checkIndivBinary Or (Op1 Not Zero) = False
+    checkIndivBinary And Zero = False
     checkIndivBinary And (Op1 Not Zero) = False
     checkIndivBinary Xor Zero = False
     checkIndivBinary Plus Zero = False
     checkIndivBinary _ _ = True
+
+    -- checkUnary Not (Op1 Not _) = False
+    -- checkUnary Shr1 (Op1 Shr4 _) = False  -- commutative
+    -- checkUnary Shr1 (Op1 Shr16 _) = False
+    -- checkUnary Shr4 (Op1 Shr16 _) = False
+    -- checkUnary _ _ = True
+    -- checkBinary b (Op2 b' _ _) _ | b == b' = False -- commutative
+    -- checkBinary b (Op1 Not _) (Op1 Not _) | b /= Plus = False -- factors out
+    -- checkBinary _ e0 e1 | e0 < e1 = False -- commutative
+    -- checkBinary b e0 e1 = checkIndivBinary b e0 && checkIndivBinary b e1
+    -- checkIndivBinary Or Zero = False
+    -- checkIndivBinary And (Op1 Not Zero) = False
+    -- checkIndivBinary Xor Zero = False
+    -- checkIndivBinary Plus Zero = False
+    -- checkIndivBinary _ _ = True
     checkCond _ e0 e1 | e0 == e1 = False
     checkCond _ _ _ = True
 
@@ -341,6 +374,7 @@ solveCache eval guess p =
           cacheLookups os transf = do 
             probs <- loadCachesFromIO standardInputs os
             let sorted = sortBy (comparing length) probs
+            -- let sorted = [foldl intersect [] probs]
             tryAll (doGuess transf . filter (checkOutputs standardInputs os)) sorted
           doGuess :: (Program -> Program) -> [Program] -> IO ()
           doGuess transf x = do
@@ -382,6 +416,10 @@ solveCacheTrain n os = do t <- train n os
                             $ \e -> do writeToAllCaches $ solution t
                                        ioError e
                           
+solveCacheReal :: Problem -> IO ()
+solveCacheReal p = do putStrLn $ "Problem: " ++ show p
+                      solveCache (\p is -> evalProblem (problemId p) is) 
+                        (guess . problemId) p
 
 -- is <- if null is0
                  --                then (smallInputs 64 ++) `fmap` pickInputs 190
@@ -461,12 +499,12 @@ difference = d' 0
         d' n i o | i .&. 1 /= o .&. 1 = n : d' (n+1) (i.>>.1) (o.>>.1)
                  | otherwise = d' (n+1) (i.>>.1) (o.>>.1)
 
-differenceC :: Word64 -> Word64 -> Word64 -> [(Int, Effect)]
-differenceC = d' 0
-  where d' n _ 0 0 = []
-        d' n i' i o | i .&. 1 /= o .&. 1 = (n, if i'.&.1 == o.&.1 then Opposite else Same) 
-                                           : d' (n+1) (i'.>>.1) (i.>>.1) (o.>>.1)
-                    | otherwise = d' (n+1) (i'.>>.1) (i.>>.1) (o.>>.1)
+-- differenceC :: Word64 -> Word64 -> Word64 -> [(Int, Effect)]
+-- differenceC = d' 0
+--   where d' n _ 0 0 = []
+--         d' n i' i o | i .&. 1 /= o .&. 1 = (n, if i'.&.1 == o.&.1 then Opposite else Same) 
+--                                            : d' (n+1) (i'.>>.1) (i.>>.1) (o.>>.1)
+--                     | otherwise = d' (n+1) (i'.>>.1) (i.>>.1) (o.>>.1)
 
 checkBit :: IsProgram p => p -> Int -> Word64 -> Bool
 checkBit p b x = checkBit' p (evaluate p x) b x
@@ -475,73 +513,13 @@ checkBit p b x = checkBit' p (evaluate p x) b x
 checkBit' :: IsProgram p => p -> Word64 -> Int -> Word64 -> Bool
 checkBit' p x0 b x = evaluate p (flipBit b x) /= x0
 
-data Effect = NoEffect | Same | Opposite | Both
-            deriving ( Eq, Enum, Ord )
-
-instance Show Effect where
-  show NoEffect = ""
-  show Same = "+"
-  show Opposite = "-"
-  show Both = "?"
-
-instance Monoid Effect where
-  mempty = NoEffect
-  mappend NoEffect x = x
-  mappend x NoEffect = x
-  mappend x y | x == y = x
-              | otherwise = Both
-
-newtype Correlation = Correlation [(Int, [(Int, Effect)])]
-
-instance Monoid Correlation where
-  mempty = Correlation []
-  mappend (Correlation a) (Correlation b) = Correlation $ app a b
-    where app [] b = b
-          app a [] = a
-          app (a:as) (b:bs) | fst a == fst b = (fst a, merge (snd a) (snd b)):app as bs
-                            | fst a < fst b = a:app as (b:bs)
-                            | otherwise = b:app (a:as) bs
-          merge [] b = b
-          merge a [] = a
-          merge (a:as) (b:bs) | fst a == fst b = (fst a, mappend (snd a) (snd b)):merge as bs
-                              | fst a < fst b = a:merge as (b:bs)
-                              | otherwise = b:merge (a:as) bs
-
-instance Show Correlation where
-  show (Correlation rows) = intercalate "\n" $ map s rows
-    where s (b, (corr)) = printf "%2d    " b ++ s' Nothing corr
-          s' Nothing ((i,b):(i',b'):ss) | i'==i+1 && b==b'
-                                         = s' (Just i) ((i',b'):ss)
-                                        | otherwise
-                                         = s'' (i,b) ++ " " ++ s' Nothing ((i',b'):ss)
-          s' Nothing (x:[]) = s'' x
-          s' Nothing [] = []
-          s' (Just i'') ((i,b):(i',b'):ss) | i'==i+1 && b==b'
-                                            = s' (Just i'') ((i',b'):ss)
-                                           | otherwise
-                                            = s'' (i'',b) ++ ".." ++ show i ++ " " ++ 
-                                              s' Nothing ((i',b'):ss)
-          s' (Just i') ((i,b):[]) = s'' (i',b) ++ ".." ++ show i
-          s'' (i, NoEffect) = ""
-          s'' (i, eff) = show eff ++ show i
-
-checkBitsC :: IsProgram p => p -> Word64 -> Correlation
-checkBitsC p x = Correlation $
-                let y0 = evaluate p x
-                in do b <- [0..63]
-                      let x1 = flipBit b x
-                          y1 = evaluate p x1
-                      case differenceC x1 y0 y1 of
-                        [] -> fail ""
-                        bs -> return (b, bs)
-
-
 -- (output bit = left edge, input bit = top edge)
-newtype Table = Table [((Int, Int), [(Word64, Bool)])]
+data Table = Table { tableData :: [((Int, Int), [(Int, Bool)])], 
+                     tableInputs :: [Word64] }
 
 instance Monoid Table where
-  mempty = Table []
-  mappend (Table a) (Table b) = Table $ app a b
+  mempty = Table [] []
+  mappend (Table a wa) (Table b wb) = Table (app a b) (wa ++ wb)
     where app [] b = b
           app a [] = a
           app (a:as) (b:bs) | fst a == fst b = (fst a, snd a ++ snd b):app as bs
@@ -549,13 +527,13 @@ instance Monoid Table where
                             | otherwise = b:app (a:as) bs
 
 instance Show Table where
- show (Table xs) = intercalate "\n" $ header : map showRow rows
+ show (Table xs _) = intercalate "\n" $ header : map showRow rows
     where rows = groupBy ((==) `on` (fst . fst)) xs
           cols :: [Int]
           cols = nub $ sort $ map (snd . fst) xs
           header :: String
           header = "   " ++ concat (map (printf "%3d") cols)
-          showRow :: [((Int, Int), [(Word64, Bool)])] -> String
+          showRow :: [((Int, Int), [(Int, Bool)])] -> String
           showRow r = printf "%2d  " (fst $ fst $ head r) ++ terms cols r
           terms :: [Int] -> [((Int, Int), [(a, Bool)])] -> String
           terms [] _ = ""
@@ -573,18 +551,154 @@ differenceT b = d' 0
                                         : d' (n+1) (i.>>.1) (o.>>.1)
                  | otherwise = d' (n+1) (i.>>.1) (o.>>.1)
 
-checkBits :: IsProgram p => p -> Word64 -> Table
-checkBits p x = Table $ sortBy (comparing fst) $
-                let y0 = evaluate p x
-                in do b <- [0..63]
-                      let x1 = flipBit b x
-                          y1 = evaluate p x1
-                      (c, r) <- differenceT (getBit b x1) y0 y1
-                      return ((c, b), [(x, r)])
+checkBits :: IsProgram p 
+             => p      -- ^ program
+             -> Int    -- ^ index of this input (more or less unused)
+             -> Word64 -- ^ actual input 
+             -> Table
+checkBits p i x = Table (sortBy (comparing fst) $
+                  let y0 = evaluate p x
+                  in do b <- [0..63]
+                        let x1 = flipBit b x
+                            y1 = evaluate p x1
+                        (c, r) <- differenceT (getBit b x1) y0 y1
+                        return ((c, b), [(i, r)])
+                  ) [x]
 
 buildTable :: IsProgram p => p -> IO Table
-buildTable p = do is <- pickInputs 100
-                  return $ mconcat $ map (checkBits p) (0:is)
+buildTable p = do is <- pickInputs 8
+                  return $ mconcat $ map (uncurry $ checkBits p) $ zip [0..] (0:is)
+
+tableToArray :: Table -> Array (Int, Int) Bool
+tableToArray (Table t _) = runSTArray $ do
+  arr <- newArray ((0, 0), (63, 63)) False
+  forM_ (map fst t) $ \(r, c) ->
+    writeArray arr (r, c) True
+  return arr
+
+findConditionalBits :: Table -> [Int]
+findConditionalBits t = let arr = tableToArray t
+                        in filter (\c -> length (filter id $ map (\r -> arr ! (r, c)) [0..63]) > 32) [0..63]
+
+-- checkConditionalBits :: Table -> [Int] -> [([Int], 
+-- checkConditionalBits t = in filter (\c -> length (filter id $ map (\r -> arr ! (r, c)) [0..63]) > 32) [0..63]
+
+solveBonus :: IO ()
+solveBonus = do t <- train (Just 42) ""
+                writeIORef lastTrainingProblemRef t
+                is'' <- pickInputs 3
+                let is = is'' ++ map complement is''
+                    is' = concatMap (\i -> i : map (\b -> flipBit b i) [0..63]) is
+                os1 <- evalProblem (trainingId t) $ take 240 is'
+                os2 <- evalProblem (trainingId t) $ drop 240 is'
+                let os = os1 ++ os2
+                    tab = mconcat $ map (\i -> checkBits' i (is !! i) (take 65 (drop (65 * i) os))) [0..5]
+                    condBits = findConditionalBits tab
+                putStrLn $ show tab
+                putStrLn $ "Conditional bits: " ++ show condBits
+                case condBits of
+                  [b] -> fail "not yet implemented"
+                  [b1, b2] -> do
+                    let condMask = mask condBits
+                        changed :: [(Int, [(Bool, Bool)])] -- outer = changed bit, inner = other's value
+                        changed = map (\b -> (b, map (\i ->
+                                         let otherBit = (condMask `xor` mask [b]) .&. (is !! i) /= 0
+                                             dist = hamming (os !! (65 * i + b)) (os !! (65 * i))
+                                         in (otherBit, dist > 20)) [0..5])) condBits
+                        changes :: [(Int, Bool)]
+                        changes = nub $ sort $ filter 
+                                  (\(i, b) -> let Just r = lookup i changed
+                                              in any (\(b', c) -> b==b' && c) r)
+                                  [(b1, False), (b1, True), (b2, False), (b2, True)]
+                        categories = [(0, 0), (mask [b2], if (b2, False) `elem` changes then 1 else 0),
+                                      (mask [b1], if (b1, False) `elem` changes then 1 else 0),
+                                      (condMask, if length changes == 4 then 0 else 1)]
+                        (is0, is1) = pickCategories condMask categories is' is'
+                        (os0, os1) = pickCategories condMask categories is' os
+                        isC = is0 ++ is1
+                        osC = replicate (length is0) 0 ++ replicate (length is1) 1
+                        -- Now solve the three problems normally
+                        pC = solve isC osC
+                        p0 = solve is0 os0
+                        p1 = solve is1 os1
+                        p = _if0 (head pC) (head p0) (head p1)
+                    putStrLn $ "Categories: " ++ show categories
+                    putStrLn $ "Condition: " ++ show (take 1 pC)
+                    putStrLn $ "0: " ++ show (take 1 p0)
+                    putStrLn $ "1: " ++ show (take 1 p1)
+                    putStrLn $ "Guessing " ++ show p
+                    resp <- guess (trainingId t) p
+                    case resp of
+                      Win -> putStrLn "Win"
+                      r -> putStrLn $ show r
+                    -- TODO - if it's rejected, gather more data for the rejectd branch
+  where checkBits' :: Int -> Word64 -> [Word64] -> Table
+        checkBits' i x0 ys = Table (sortBy (comparing fst) $
+                  let y0 = head ys
+                  in do b <- [0..63]
+                        let x1 = flipBit b x0
+                            y1 = ys !! (b + 1)
+                        (c, r) <- differenceT (getBit b x1) y0 y1
+                        return ((c, b), [(i, r)])
+                  ) [x0]
+        mask :: [Int] -> Word64
+        mask [] = 0
+        mask (b:bs) = 1.<<.b .|. mask bs
+        pickCategories cm = pc' cm [] []
+        pc' cm c0 c1 _ [] [] = (c0, c1)
+        pc' cm c0 c1 cats (i:is) (o:os) | Just 0 <- lookup (cm .&. i) cats = pc' cm (o:c0) c1 cats is os
+                                        | otherwise = pc' cm c0 (o:c1) cats is os
+        solve is os = let ps = map fst $ concat $ take 8 generateAll
+                      in filter (checkOutputs is os) ps
+         
+
+
+-- solveBonus2 t (b1:b2:[]) = do is <- (clearBit b1 . clearBit b2) `fmap` pickInputs 32
+--                                       let is' = concatMap (\b -> map (\i -> i .|. b) is) 
+--                                                 [0, mask [b1], mask [b2], mask [b1, b2]]
+--                                       os <- evalProblem (trainingId t) is'
+--                                       let tabs = map (\r -> mconcat $ map (\i -> checkBits' i (is !! i) (take 65 (drop (65 * i) os))) [0.. 4]
+                                      
+
+                                                       
+--                                                        if length condBits > 2 then fail "Too many conditional bits!" else return ()
+--                 if length condBits == 0 then fail "Just do a regular solve?!?" else return ()
+--                 -- Phase 2: find 8 random inputs, toggle the condbits, see what matters
+--                 if length condBits == 1 then bonus1 condBits
+--                                         else bonus2 condBits
+
+-- mapInputs :: Table -> Map Word64 Int
+-- mapInputs (Table cells) = mi 0 Map.empty $ concat $ map (map fst . snd) cells
+--   where mi i m [] = m
+--         mi i m (w:ws) | not $ Map.member w m = mi (i+1) (Map.insert w i m) ws
+--                       | otherwise = mi i m ws
+
+hamming :: Word64 -> Word64 -> Int
+hamming a b = length $ difference a b
+
+partition :: IsProgram p => p -> ([Word64], [Word64])
+partition p = let ic = incrementalChanges p
+              in p' 0 ([], []) ic
+  where p' _ t [] = t
+        p' 0 (as, bs) ((a, _, n):xs) = p' (if n > 25 then 1 else 0) (a:as, bs) xs
+        p' 1 (as, bs) ((a, _, n):xs) = p' (if n > 25 then 0 else 1) (as, a:bs) xs
+
+incrementalChanges :: IsProgram p => p -> [(Word64, Word64, Int)]
+incrementalChanges p = ic 0 0 256
+  where ic _ _ 0 = []
+        ic w b n = let w' = flipBit b w
+                   in (w, w', hamming (evaluate p w) (evaluate p w')) 
+                      : ic w' ((b + 1 + (if n `mod` 64 == 63 then 1 else 0)) `mod` 64) (n-1)
+        
+adjacency :: Table -> Array (Int, Int) Int
+adjacency (Table cells words) = runSTArray $ do
+  arr <- newArray ((0, 0), (length words - 1, length words - 1)) 0 
+  forM_ (map (map fst . snd) cells) $ \is ->
+    forM_ is $ \a -> do 
+      forM_ is $ \b -> do
+        count <- readArray arr (a, b)
+        writeArray arr (a, b) (1 + count)
+  return arr
 
 -- explore :: [Word64] -> [Word64] -> IO ()
 -- explore is os = do forM_ [1..64] $ \n -> do
@@ -592,7 +706,7 @@ buildTable p = do is <- pickInputs 100
 --                      print $ findOnes $ (i .<<. n) `xor` i `xor` maxBound
 
 cacheLocation :: String
-cacheLocation = "cache/"
+cacheLocation = "cache2/"
 
 packForHash :: [Word64] -> [Word8]
 packForHash = pfh 0 0
@@ -831,7 +945,7 @@ depthFirst maxDepth = df _0 ++ df _1 ++ df _x
         checkUnary _ _ = True
         -- checkBinary b (Op2 b' _ _) _ | b == b' = False -- commutative
         checkBinary b (Op1 Not _) (Op1 Not _) | b /= Plus = False -- factors out
-        checkBinary b e0 e1 | b /= Plus && e0 == e1 = False -- x or x is boring
+        checkBinary b e0 e1 | e0 == e1 = False -- x or x is boring
                             | size e0 < size e1 || (size e0 == size e1 && e0 < e1) = False -- commutative
                             | otherwise = checkIndivBinary b e0 && checkIndivBinary b e1
         checkIndivBinary Or Zero = False
