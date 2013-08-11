@@ -390,6 +390,24 @@ solveCache eval guess p =
                   err -> fail $ show err
               [] -> fail $ "ran out of options"
 
+solveMulti :: Problem -> IO ()
+solveMulti p = solveCacheReal p `catchIOError` \_ -> solveReal p
+
+solveNext :: Int -> IO ()
+solveNext n = do unsolved <- (sortBy (comparing problemSize) . filter (\p -> problemTime p == Nothing)) 
+                             `fmap` reloadProblems
+              forM_ (take n unsolved) solveMulti
+
+emergencySolve :: IO ()
+emergencySolve = do probs <- problemreloadProblems
+                    inProgress = filter (\p -> 
+                                          case problemTime p of
+                                            Just 0 -> False 
+                                            Nothing -> False 
+                                            _ -> True
+                                        ) probs
+                    forM_ inProgress solveMulti
+
 reversible :: [(Word64 -> Word64 -> Word64, Program -> Program)]
 reversible = map reverseXor sp ++ map reversePlus sp
   where sp = -- map unCachedProgram smallPrograms
