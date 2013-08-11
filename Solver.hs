@@ -820,7 +820,7 @@ solveBonusReal t =
                     let pC = _and _1 $ canonicalize $ P "x" $ Shift (-b) $ Id "x" -- solve isC osC
                         is0 = map (.&. (complement $ mask [b])) $ take 127 standardInputs
                         is1 = map (.|. mask [b]) $ take 127 standardInputs
-                    print $ zipWith (\x y -> (x .&. mask [b], y .&. mask [b])) standardInputs is0
+                    -- print $ zipWith (\x y -> (x .&. mask [b], y .&. mask [b])) standardInputs is0
                     -- print $ zipWith (\a b -> (a .&. condMask, b .&. condMask)) standardInputs is0
                     os'' <- eval t (is0 ++ is1)
                     let os0 = take 127 os''
