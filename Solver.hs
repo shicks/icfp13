@@ -805,7 +805,9 @@ solveBonusReal t =
                 is'' <- pickInputs 3
                 let is = is'' ++ map complement is''
                     is' = concatMap (\i -> i : map (\b -> flipBit b i) [0..63]) is
+                putStrLn "Evaluating"
                 os <- eval t is'
+                putStrLn "Evaluated"
                     -- os = map (evaluate $ solution t) is'
                 -- os1 <- evalProblem (trainingId t) $ take 240 is'
                 -- os2 <- evalProblem (trainingId t) $ drop 240 is'
@@ -911,9 +913,9 @@ solveBonusReal t =
                         (c, r) <- differenceT (getBit b x1) y0 y1
                         return ((c, b), [(i, r)])
                   ) [x0]
-        eval t is | length is > 63 = do is0 <- eval t (take 255 is)
-                                        is1 <- eval t (drop 255 is)
-                                        return $ is0 ++ is1
+        eval t is | length is > 255 = do is0 <- eval t (take 255 is)
+                                         is1 <- eval t (drop 255 is)
+                                         return $ is0 ++ is1
                   | otherwise = evalProblem (problemId t) is
                                 -- return $ map (evaluate $ solution t) is
         mask :: [Int] -> Word64
