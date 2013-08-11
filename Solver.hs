@@ -18,7 +18,7 @@ import Control.Monad ( forM, forM_ )
 import Crypto.Hash.SHA1 ( hash )
 import Data.Array ( listArray, range, assocs )
 import Data.Bits ( Bits, (.&.), (.|.), complement, 
-                   shiftL, shiftR, shift, xor )
+                   shiftL, shiftR, shift, setBit, xor )
 import Data.ByteString.Lazy ( ByteString )
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
@@ -437,7 +437,13 @@ solveNext :: Int -> Int -> IO ()
 solveNext skip n = 
               do next <- (sortBy (comparing problemSize) . filter (\p -> unattempted p && not ("bonus" `elem` problemOperators p)))
                              `fmap` reloadProblems
-                 forM_ (take n $ drop skip next) solveMulti
+                 forM_ (take n $ drop skip next) $ \p -> time (solveMulti p) >>= print
+
+solveNextBonus :: Int -> Int -> IO ()
+solveNextBonus skip n = 
+              do next <- (sortBy (comparing problemSize) . filter (\p -> unattempted p && ("bonus" `elem` problemOperators p)))
+                             `fmap` reloadProblems
+                 forM_ (take n $ drop skip next) solveBonusReal
 
 emergencySolve :: IO ()
 emergencySolve = do probs <- reloadProblems
@@ -656,56 +662,104 @@ findConditionalBits t = let arr = tableToArray t
 -- checkConditionalBits :: Table -> [Int] -> [([Int], 
 -- checkConditionalBits t = in filter (\c -> length (filter id $ map (\r -> arr ! (r, c)) [0..63]) > 32) [0..63]
 
-solveBonus :: IO ()
-solveBonus = do t <- train (Just 42) ""
+solveBonus :: Maybe TrainingProblem -> IO ()
+solveBonus Nothing = train (Just 42) "" >>= solveBonus . Just
+solveBonus (Just t) =
+             do print t
                 writeIORef lastTrainingProblemRef t
                 is'' <- pickInputs 3
                 let is = is'' ++ map complement is''
                     is' = concatMap (\i -> i : map (\b -> flipBit b i) [0..63]) is
+                os <- eval t is'
+                    -- os = map (evaluate $ solution t) is'
                 -- os1 <- evalProblem (trainingId t) $ take 240 is'
                 -- os2 <- evalProblem (trainingId t) $ drop 240 is'
-                let os = map (evaluate $ solution t) is'
                     --os = os1 ++ os2
-                    tab = mconcat $ map (\i -> checkBits' i (is !! i) (take 65 (drop (65 * i) os))) [0..5]
+                let tab = mconcat $ map (\i -> checkBits' i (is !! i) (take 65 (drop (65 * i) os))) [0..5]
                     condBits = findConditionalBits tab
                 putStrLn $ show tab
+                putStrLn $ show $ canonicalize $ solution t
                 putStrLn $ "Conditional bits: " ++ show condBits
                 case condBits of
-                  [b] -> fail "not yet implemented"
-                  [b1, b2] -> do
-                    let condMask = mask condBits
-                        changed :: [(Int, [(Bool, Bool)])] -- outer = changed bit, inner = other's value
-                        changed = map (\b -> (b, map (\i ->
-                                         let otherBit = (condMask `xor` mask [b]) .&. (is !! i) /= 0
-                                             dist = hamming (os !! (65 * i + b)) (os !! (65 * i))
-                                         in (otherBit, dist > 20)) [0..5])) condBits
-                        changes :: [(Int, Bool)]
-                        changes = nub $ sort $ filter 
-                                  (\(i, b) -> let Just r = lookup i changed
-                                              in any (\(b', c) -> b==b' && c) r)
-                                  [(b1, False), (b1, True), (b2, False), (b2, True)]
-                        categories = [(0, 0), (mask [b2], if (b2, False) `elem` changes then 1 else 0),
-                                      (mask [b1], if (b1, False) `elem` changes then 1 else 0),
-                                      (condMask, if length changes == 4 then 0 else 1)]
-                        (is0, is1) = pickCategories condMask categories is' is'
-                        (os0, os1) = pickCategories condMask categories is' os
-                        isC = is0 ++ is1
-                        osC = replicate (length is0) 0 ++ replicate (length is1) 1
-                        -- Now solve the three problems normally
-                        pC = solve isC osC
-                        p0 = solve is0 os0
+                  [b] -> do
+                    let pC = _and _1 $ canonicalize $ P "x" $ Shift (-b) $ Id "x" -- solve isC osC
+                        is0 = map (.&. (complement $ mask [b])) standardInputs
+                        is1 = map (.|. mask [b]) standardInputs
+                    print $ zipWith (\x y -> (x .&. mask [b], y .&. mask [b])) standardInputs is0
+                    os0 <- eval t is0
+                    os1 <- eval t is1
+                    let p0 = solve is0 os0
                         p1 = solve is1 os1
-                        p = _if0 (head pC) (head p0) (head p1)
-                    putStrLn $ "Changed: " ++ show changed
-                    putStrLn $ "Categories: " ++ show categories
-                    putStrLn $ "Condition: " ++ show (take 1 pC)
+                        p = _if0 pC (head p0) (head p1)
+                    --putStrLn $ "Changed: " ++ show changed
+                    --putStrLn $ "Changes: " ++ show changes
+                    -- putStrLn $ "Categories: " ++ show categories
+                    putStrLn $ "Condition: " ++ show pC
                     putStrLn $ "0: " ++ show (take 1 p0)
                     putStrLn $ "1: " ++ show (take 1 p1)
                     putStrLn $ "Guessing " ++ show p
                     resp <- guess (trainingId t) p
                     case resp of
                       Win -> putStrLn "Win"
-                      r -> putStrLn $ show r
+                      r -> do putStrLn $ show r
+                              --  resp' <- guess (trainingId t) (_if0 pC (head p1) (head p0))
+                              -- case resp' of
+                              --   Win -> putStrLn "Win"
+                              --   r' -> do putStrLn $ show r'
+                  [b1, b2] -> do
+                    let condMask = mask condBits
+                    [iC'] <- pickInputs 1
+                    let iC0 = iC' .&. complement condMask
+                        iC = [iC0, mask [b1] .|. iC0, mask [b2] .|. iC0, iC0 .|. condMask]
+                    oC <- eval t iC
+                    -- let changed :: [(Int, [(Bool, Int)])] -- outer = changed bit, inner = other's value
+                    --     changed = map (\b -> (b, map (\i ->
+                    --                      let otherBit = (condMask `xor` mask [b]) .&. (is !! i) /= 0
+                    --                          dist = hamming (os !! (65 * i + b + 1)) (os !! (65 * i))
+                    --                      in (otherBit, dist)) [0..5])) condBits
+                    --     changes :: [(Int, Bool)]
+                    --     changes = nub $ sort $ filter 
+                    --               (\(i, b) -> let Just r = lookup i changed
+                    --                           in any (\(b', c) -> b==b' && c>25) r)
+                    --               [(b1, False), (b1, True), (b2, False), (b2, True)]
+                    let c00 = 0
+                        c01 = if hamming (oC !! 0) (oC !! 1) > 20 then 1 else 0
+                        c10 = if hamming (oC !! 0) (oC !! 2) > 20 then 1 else 0
+                        c11 = if hamming (oC !! 0) (oC !! 3) > 20 then 1 else 0
+                        -- c01 = if (b2, False) `elem` changes then 1 else 0
+                        -- c10 = if (b1, True) `elem` changes then 1 else 0
+                        -- c11 = if length changes == 4 then 0 else 1
+                        categories = [(0, c00), (mask [b1], c01), (mask [b2], c10), (condMask, c11)]
+                        --(is0, is1) = pickCategories condMask categories is' is'
+                        --(os0, os1) = pickCategories condMask categories is' os
+                        --isC = is0 ++ is1
+                        --osC = replicate (length is0) 0 ++ replicate (length is1) 1
+                        -- Now solve the three problems normally
+                        pC = makeCondition2 b1 b2 categories -- solve isC osC
+                        is0 = map (onlyCat2 categories 0) standardInputs
+                        is1 = map (onlyCat2 categories 1) standardInputs
+                    print $ zipWith (\a b -> (a .&. condMask, b .&. condMask)) standardInputs is0
+                    os0 <- eval t is0
+                    os1 <- eval t is1
+                    let p0 = solve is0 os0
+                        p1 = solve is1 os1
+                        p = _if0 pC (head p0) (head p1)
+                    --putStrLn $ "Changed: " ++ show changed
+                    --putStrLn $ "Changes: " ++ show changes
+                    putStrLn $ "Categories: " ++ show categories
+                    putStrLn $ "Condition: " ++ show pC
+                    putStrLn $ "0: " ++ show (take 1 p0)
+                    putStrLn $ "1: " ++ show (take 1 p1)
+                    putStrLn $ "Guessing " ++ show p
+                    resp <- guess (trainingId t) p
+                    case resp of
+                      Win -> putStrLn "Win"
+                      r -> do putStrLn $ show r
+                              -- resp' <- guess (trainingId t) (_if0 pC (head p1) (head p0))
+                              -- case resp' of
+                              --   Win -> putStrLn "Win"
+                              --   r' -> do putStrLn $ show r'
+                              
                     -- TODO - if it's rejected, gather more data for the rejectd branch
   where checkBits' :: Int -> Word64 -> [Word64] -> Table
         checkBits' i x0 ys = Table (sortBy (comparing fst) $
@@ -716,6 +770,7 @@ solveBonus = do t <- train (Just 42) ""
                         (c, r) <- differenceT (getBit b x1) y0 y1
                         return ((c, b), [(i, r)])
                   ) [x0]
+        eval t is = return $ map (evaluate $ solution t) is
         mask :: [Int] -> Word64
         mask [] = 0
         mask (b:bs) = 1.<<.b .|. mask bs
@@ -725,8 +780,169 @@ solveBonus = do t <- train (Just 42) ""
                                         | otherwise = pc' cm c0 (o:c1) cats is os
         solve is os = let ps = map fst $ concat $ take 8 generateAll
                       in filter (checkOutputs is os) ps
-         
+        makeCondition2 :: Int -> Int -> [(Word64, Int)] -> Program
+        makeCondition2 b1 b2 t = _and _1 $ mc2 (canonicalize $ P "x" $ Shift (-b1) $ Id "x") (canonicalize $ P "x" $ Shift (-b2) $ Id "x") $ map snd t
+          where mc2 p0 p1 [0, 1, 1, 1] = _or p0 p1
+                mc2 p0 p1 [1, 0, 1, 1] = _or (_not p0) p1
+                mc2 p0 p1 [1, 1, 0, 1] = _or p0 (_not p1)
+                mc2 p0 p1 [1, 1, 1, 0] = _not $ _and p0 p1
+                mc2 p0 p1 [0, 1, 1, 0] = _xor p0 p1
+                mc2 p0 p1 [1, 0, 0, 1] = _not $ _xor p0 p1
+                mc2 p0 p1 [0, 0, 0, 1] = _and p0 p1
+                mc2 p0 p1 [0, 0, 1, 0] = _and (_not p0) p1
+                mc2 p0 p1 [0, 1, 0, 0] = _and p0 (_not p1)
+                mc2 p0 p1 [1, 0, 0, 0] = _not $ _or p0 p1
+        onlyCat2 cats cat i = let m0 = complement $ fst $ cats !! 3
+                                  m1 = find cats
+                              in (i .&. m0) .|. m1
+           where find [] = error ""
+                 find ((m, c):ms) | c == cat = m
+                                  | otherwise = find ms
 
+solveBonusReal :: Problem -> IO ()
+solveBonusReal t =
+             do print t
+                is'' <- pickInputs 3
+                let is = is'' ++ map complement is''
+                    is' = concatMap (\i -> i : map (\b -> flipBit b i) [0..63]) is
+                os <- eval t is'
+                    -- os = map (evaluate $ solution t) is'
+                -- os1 <- evalProblem (trainingId t) $ take 240 is'
+                -- os2 <- evalProblem (trainingId t) $ drop 240 is'
+                    --os = os1 ++ os2
+                let tab = mconcat $ map (\i -> checkBits' i (is !! i) (take 65 (drop (65 * i) os))) [0..5]
+                    condBits = findConditionalBits tab
+                putStrLn $ show tab
+                -- putStrLn $ show $ canonicalize $ solution t
+                putStrLn $ "Conditional bits: " ++ show condBits
+                case condBits of
+                  [b] -> do
+                    let pC = _and _1 $ canonicalize $ P "x" $ Shift (-b) $ Id "x" -- solve isC osC
+                        is0 = map (.&. (complement $ mask [b])) $ take 127 standardInputs
+                        is1 = map (.|. mask [b]) $ take 127 standardInputs
+                    print $ zipWith (\x y -> (x .&. mask [b], y .&. mask [b])) standardInputs is0
+                    -- print $ zipWith (\a b -> (a .&. condMask, b .&. condMask)) standardInputs is0
+                    os'' <- eval t (is0 ++ is1)
+                    let os0 = take 127 os''
+                        os1 = drop 127 os''
+                    -- os0 <- eval t is0
+                    -- os1 <- eval t is1
+                    let p0 = solve is0 os0
+                        p1 = solve is1 os1
+                        p = _if0 pC (head p0) (head p1)
+                    --putStrLn $ "Changed: " ++ show changed
+                    --putStrLn $ "Changes: " ++ show changes
+                    -- putStrLn $ "Categories: " ++ show categories
+                    putStrLn $ "Condition: " ++ show pC
+                    putStrLn $ "0: " ++ show (take 1 p0)
+                    putStrLn $ "1: " ++ show (take 1 p1)
+                    putStrLn $ "Guessing " ++ show p
+                    resp <- guess (problemId t) p
+                    case resp of
+                      Win -> putStrLn "Win"
+                      r -> fail $ show r
+                              --  resp' <- guess (trainingId t) (_if0 pC (head p1) (head p0))
+                              -- case resp' of
+                              --   Win -> putStrLn "Win"
+                              --   r' -> do putStrLn $ show r'
+                  [b1, b2] -> do
+                    let condMask = mask condBits
+                    [iC'] <- pickInputs 1
+                    let iC0 = iC' .&. complement condMask
+                        iC = [iC0, mask [b1] .|. iC0, mask [b2] .|. iC0, iC0 .|. condMask]
+                    oC <- eval t iC
+                    -- let changed :: [(Int, [(Bool, Int)])] -- outer = changed bit, inner = other's value
+                    --     changed = map (\b -> (b, map (\i ->
+                    --                      let otherBit = (condMask `xor` mask [b]) .&. (is !! i) /= 0
+                    --                          dist = hamming (os !! (65 * i + b + 1)) (os !! (65 * i))
+                    --                      in (otherBit, dist)) [0..5])) condBits
+                    --     changes :: [(Int, Bool)]
+                    --     changes = nub $ sort $ filter 
+                    --               (\(i, b) -> let Just r = lookup i changed
+                    --                           in any (\(b', c) -> b==b' && c>25) r)
+                    --               [(b1, False), (b1, True), (b2, False), (b2, True)]
+                    let c00 = 0
+                        c01 = if hamming (oC !! 0) (oC !! 1) > 20 then 1 else 0
+                        c10 = if hamming (oC !! 0) (oC !! 2) > 20 then 1 else 0
+                        c11 = if hamming (oC !! 0) (oC !! 3) > 20 then 1 else 0
+                        -- c01 = if (b2, False) `elem` changes then 1 else 0
+                        -- c10 = if (b1, True) `elem` changes then 1 else 0
+                        -- c11 = if length changes == 4 then 0 else 1
+                        categories = [(0, c00), (mask [b1], c01), (mask [b2], c10), (condMask, c11)]
+                        --(is0, is1) = pickCategories condMask categories is' is'
+                        --(os0, os1) = pickCategories condMask categories is' os
+                        --isC = is0 ++ is1
+                        --osC = replicate (length is0) 0 ++ replicate (length is1) 1
+                        -- Now solve the three problems normally
+                        pC = makeCondition2 b1 b2 categories -- solve isC osC
+                        is0 = map (onlyCat2 categories 0) $ take 127 standardInputs
+                        is1 = map (onlyCat2 categories 1) $ take 127 standardInputs
+                    -- print $ zipWith (\a b -> (a .&. condMask, b .&. condMask)) standardInputs is0
+                    os'' <- eval t (is0 ++ is1)
+                    let os0 = take 127 os''
+                        os1 = drop 127 os''
+                    -- os1 <- eval t is1
+                    let p0 = solve is0 os0
+                        p1 = solve is1 os1
+                        p = _if0 pC (head p0) (head p1)
+                    --putStrLn $ "Changed: " ++ show changed
+                    --putStrLn $ "Changes: " ++ show changes
+                    putStrLn $ "Categories: " ++ show categories
+                    putStrLn $ "Condition: " ++ show pC
+                    putStrLn $ "0: " ++ show (take 1 p0)
+                    putStrLn $ "1: " ++ show (take 1 p1)
+                    putStrLn $ "Guessing " ++ show p
+                    resp <- guess (problemId t) p
+                    case resp of
+                      Win -> putStrLn "Win"
+                      r -> fail $ show r
+                              -- resp' <- guess (trainingId t) (_if0 pC (head p1) (head p0))
+                              -- case resp' of
+                              --   Win -> putStrLn "Win"
+                              --   r' -> do putStrLn $ show r'
+                              
+                    -- TODO - if it's rejected, gather more data for the rejectd branch
+  where checkBits' :: Int -> Word64 -> [Word64] -> Table
+        checkBits' i x0 ys = Table (sortBy (comparing fst) $
+                  let y0 = head ys
+                  in do b <- [0..63]
+                        let x1 = flipBit b x0
+                            y1 = ys !! (b + 1)
+                        (c, r) <- differenceT (getBit b x1) y0 y1
+                        return ((c, b), [(i, r)])
+                  ) [x0]
+        eval t is | length is > 63 = do is0 <- eval t (take 255 is)
+                                        is1 <- eval t (drop 255 is)
+                                        return $ is0 ++ is1
+                  | otherwise = evalProblem (problemId t) is
+                                -- return $ map (evaluate $ solution t) is
+        mask :: [Int] -> Word64
+        mask [] = 0
+        mask (b:bs) = 1.<<.b .|. mask bs
+        pickCategories cm = pc' cm [] []
+        pc' cm c0 c1 _ [] [] = (c0, c1)
+        pc' cm c0 c1 cats (i:is) (o:os) | Just 0 <- lookup (cm .&. i) cats = pc' cm (o:c0) c1 cats is os
+                                        | otherwise = pc' cm c0 (o:c1) cats is os
+        solve is os = let ps = map fst $ concat $ take 8 generateAll
+                      in filter (checkOutputs is os) ps
+        makeCondition2 :: Int -> Int -> [(Word64, Int)] -> Program
+        makeCondition2 b1 b2 t = _and _1 $ mc2 (canonicalize $ P "x" $ Shift (-b1) $ Id "x") (canonicalize $ P "x" $ Shift (-b2) $ Id "x") $ map snd t
+          where mc2 p0 p1 [0, 1, 1, 1] = _or p0 p1
+                mc2 p0 p1 [1, 0, 1, 1] = _or (_not p0) p1
+                mc2 p0 p1 [1, 1, 0, 1] = _or p0 (_not p1)
+                mc2 p0 p1 [1, 1, 1, 0] = _not $ _and p0 p1
+                mc2 p0 p1 [0, 1, 1, 0] = _xor p0 p1
+                mc2 p0 p1 [1, 0, 0, 1] = _not $ _xor p0 p1
+                mc2 p0 p1 [0, 0, 0, 1] = _and p0 p1
+                mc2 p0 p1 [0, 0, 1, 0] = _and (_not p0) p1
+                mc2 p0 p1 [0, 1, 0, 0] = _and p0 (_not p1)
+                mc2 p0 p1 [1, 0, 0, 0] = _not $ _or p0 p1
+        onlyCat2 cats cat i = let m0 = complement $ fst $ cats !! 3
+                                  m1 = find cats
+                              in (i .&. m0) .|. m1
+           where find [] = error ""
+                 find ((m, c):ms) | c == cat = m
+                                  | otherwise = find ms
 
 -- solveBonus2 t (b1:b2:[]) = do is <- (clearBit b1 . clearBit b2) `fmap` pickInputs 32
 --                                       let is' = concatMap (\b -> map (\i -> i .|. b) is) 
