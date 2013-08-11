@@ -215,7 +215,7 @@ rpc path req = rpc'' 3
   where rpc'' retries = catchIOError (wait 5 >> rpc' path req) $
                         \e -> if retries == 0 then ioError e
                                               else do putStrLn $ "Retrying: " ++ show e
-                                                      wait 15
+                                                      wait 10
                                                       rpc'' (retries - 1)
 
 rpc' :: (JSON i, JSON o) => String -> i -> IO o
