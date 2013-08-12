@@ -1,0 +1,36 @@
+We tried a number of different approaches, but ultimately never made it too far past a brute force breadth-first search, though we did implement a number of optimizations to eliminate useless expressions from our programs.  During the last 36 hours we split into a two-pronged effort.  The first prong focused on building up a massive cache of all "canonically reduced" programs of size 10 or less, indexed by the outputs to a few selected inputs.  This was built depth-first to simplify remembering the results of subexpressions (a common slow-down in breadth-first).  From a rough survey we did, we estimated that the majority of training problems of size 30 had functional equivalents of size 10 or less, so if this cache had worked, we should have been able to tear through most of the problems.  Unfortunately, it only seemed to work on training problems (I swear!).  It even failed (inexplicably) to match the simplest programs like (lambda (x) (shr1 x)).  So after spending the majority of our CPU-hours constructing 11G at various depths on various machines across 1.5 million files, it turns out to be misplaced effort.  If we'd instead focused on just attacking the bigger problems with our existing solutions earlier, we probably could have scored another 300 points (which still wouldn't have tipped the scales enough).  The second prong was to actually analyze the outputs and analytically build up programs.  This seemed hopeless until Saturday morning's bonus questions, which made me very happy since, after hacking away at some of the ugliest code I've ever written in my life ("is 0 true or false?  arrrgggggh!") I was finally able to match better than 50% on the small bonuses (but only had time for 55 before time was up).  Since we were running the programs on multiple machines, it turned out that one of the most useful things we did was to build in automatic error-retries for all the requests, so as not to fail unnecessarily when quota ran out (which happened WAY too frequently).  In the end, we averaged 69% on the just-under half of the problems we attemped, which I think is pretty good.
+
+FINAL STATS:
+{"easyChairId":"332",
+ "contestScore":619,
+ "lightningScore":310,
+ "trainingScore":176,
+ "mismatches":107,
+ "numRequests":4378,
+ "requestWindow":{"resetsIn":4.844,"amount":2,"limit":5},
+ "cpuWindow":{"resetsIn":24.844,"amount":2.4,"limit":20},
+ "cpuTotalTime":3862.057}
+
+SIZE [CORRECT,WRONG,UNATTEMPTED]:
+3 [20,0,0]
+4 [20,0,0]
+5 [20,0,0]
+6 [20,0,0]
+7 [20,0,0]
+8 [40,0,0]
+9 [40,0,0]
+10 [40,0,0]
+11 [57,3,0]
+12 [49,11,0]
+13 [48,12,0]
+14 [39,21,0]
+15 [31,29,0]
+16 [26,34,0]
+17 [25,35,0]
+18 [22,38,0]
+19 [29,31,0]
+20 [29,31,0]
+21 [15,12,33]
+22..30 [0,0,60]
+"42" [29,26,145] # 1st round of bonuses
+"137" [0,0,200]  # 2nd round of bonuses
